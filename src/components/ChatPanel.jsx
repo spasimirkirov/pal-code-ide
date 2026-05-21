@@ -202,8 +202,8 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
                     <article
                         key={message.id}
                         className={`rounded-2xl border p-3 shadow-sm ${isUser
-                                ? 'ml-8 border-cyan-400/30 bg-cyan-400/10'
-                                : 'mr-8 border-slate-700/70 bg-slate-900/80'
+                            ? 'ml-8 border-cyan-400/30 bg-cyan-400/10'
+                            : 'mr-8 border-slate-700/70 bg-slate-900/80'
                             }`}
                     >
                         <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.12em] text-slate-400">
