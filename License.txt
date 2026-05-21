@@ -1,0 +1,8 @@
+Copyright (c) 2026 Lynxivion LTD / PAL IDE. All rights reserved.
+
+Commercial Terms:
+This software is proprietary. Code visibility on GitHub is strictly for educational and review purposes. 
+
+You may not modify, distribute, sublicense, or sell this software, its source code, or its compiled binaries without explicit written permission from the copyright holder.
+
+To legally run and use the application, a valid license key must be purchased via official distribution channels (such as Lemon Squeezy).
