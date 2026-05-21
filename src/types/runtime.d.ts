@@ -20,6 +20,9 @@ declare global {
                     port: string;
                     activeModel: string;
                 };
+                llamaServer: {
+                    selectedFlavor: 'auto' | 'cpu' | 'cuda' | 'vulkan';
+                };
             }>;
             setAiAssistantSettings: (payload: {
                 engine?: 'llama-server' | 'lm-studio';
@@ -33,6 +36,9 @@ declare global {
                     port: string;
                     activeModel: string;
                 }>;
+                llamaServer?: Partial<{
+                    selectedFlavor: 'auto' | 'cpu' | 'cuda' | 'vulkan';
+                }>;
             }) => Promise<{
                 engine: 'llama-server' | 'lm-studio';
                 roleMappings: {
@@ -44,6 +50,9 @@ declare global {
                     endpointUrl: string;
                     port: string;
                     activeModel: string;
+                };
+                llamaServer: {
+                    selectedFlavor: 'auto' | 'cpu' | 'cuda' | 'vulkan';
                 };
             }>;
             checkLocalModels: () => Promise<{
@@ -69,7 +78,10 @@ declare global {
             }>;
             downloadLlamaServerVersion: (payload: { flavor: 'auto' | 'cpu' | 'cuda' | 'vulkan' }) => Promise<{
                 ok: boolean;
-                flavor: string;
+                requestedFlavor: string;
+                installedFlavor?: string;
+                executablePath?: string;
+                assetName?: string;
             }>;
             lmStudioGetModels: (payload: {
                 endpointUrl?: string;

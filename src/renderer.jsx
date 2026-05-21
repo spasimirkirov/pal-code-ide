@@ -137,17 +137,26 @@ function App() {
                     return;
                 }
 
-                setBootstrapState((current) => ({
-                    ...current,
-                    visible: progress.completed ? false : true,
-                    inProgress: Boolean(progress.inProgress),
-                    label: progress.label || current.label,
-                    percent: Number.isFinite(progress.percent) ? progress.percent : current.percent,
-                    stage: progress.stage || current.stage,
-                    canDismiss: Boolean(progress.completed || progress.cancelled || progress.error),
-                    cancelled: Boolean(progress.cancelled),
-                    error: Boolean(progress.error),
-                }));
+                setBootstrapState((current) => {
+                    const stage = String(progress.stage || current.stage);
+                    const isBootstrapStage = ['init', 'complete', 'cancelled', 'error'].includes(stage);
+
+                    if (!isBootstrapStage && !current.visible) {
+                        return current;
+                    }
+
+                    return {
+                        ...current,
+                        visible: Boolean(progress.completed) ? false : true,
+                        inProgress: Boolean(progress.inProgress),
+                        label: progress.label || current.label,
+                        percent: Number.isFinite(progress.percent) ? progress.percent : current.percent,
+                        stage,
+                        canDismiss: Boolean(progress.completed || progress.cancelled || progress.error),
+                        cancelled: Boolean(progress.cancelled),
+                        error: Boolean(progress.error),
+                    };
+                });
             });
         }
 
@@ -513,11 +522,11 @@ function App() {
                             title="Resize chat"
                         />
                         <section className="glass-chrome shrink-0 border-l" style={{ width: `${paneDimensions.rightChatWidth}px` }}>
-                        <ChatPanel
-                            workspaceRoot={workspaceRoot}
-                            onApplyCode={handleApplyCode}
-                            onModelMetricsUpdate={handleModelMetricsUpdate}
-                        />
+                            <ChatPanel
+                                workspaceRoot={workspaceRoot}
+                                onApplyCode={handleApplyCode}
+                                onModelMetricsUpdate={handleModelMetricsUpdate}
+                            />
                         </section>
                     </>
                 )}

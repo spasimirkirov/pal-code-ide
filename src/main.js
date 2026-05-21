@@ -1,10 +1,10 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import si from 'systeminformation';
 import Store from 'electron-store';
+import * as nodePty from '@homebridge/node-pty-prebuilt-multiarch';
 import started from 'electron-squirrel-startup';
 import { getRuntimePaths } from './runtime/runtime-paths';
 import { createWorkspaceService } from './runtime/workspace-service';
@@ -27,7 +27,7 @@ let hardwareSnapshot = {
 const terminalSessions = new Map();
 let terminalSessionCounter = 1;
 
-const MODELS_ROOT_DIR = path.join(app.getPath('appData'), 'pal-ide', 'models');
+const LEGACY_MODELS_ROOT_DIR = path.join(app.getPath('appData'), 'pal-ide', 'models');
 
 const dbProfilesStore = new Store({
   name: 'pal-code-ide-store',
@@ -65,6 +65,9 @@ const aiAssistantStore = new Store({
       endpointUrl: 'http://localhost:1234',
       port: '1234',
       activeModel: '',
+    },
+    llamaServer: {
+      selectedFlavor: 'auto',
     },
   },
 });
@@ -111,6 +114,11 @@ const normalizeDbProfile = (payload = {}) => ({
 const sanitizeAiAssistantSettings = (input = {}) => {
   const roleMappings = input?.roleMappings || {};
   const lmStudio = input?.lmStudio || {};
+  const llamaServer = input?.llamaServer || {};
+  const selectedFlavor = String(llamaServer.selectedFlavor || 'auto').toLowerCase();
+  const allowedFlavor = ['auto', 'cpu', 'cuda', 'vulkan'].includes(selectedFlavor)
+    ? selectedFlavor
+    : 'auto';
 
   return {
     engine: String(input?.engine || 'llama-server') === 'lm-studio' ? 'lm-studio' : 'llama-server',
@@ -123,6 +131,9 @@ const sanitizeAiAssistantSettings = (input = {}) => {
       endpointUrl: String(lmStudio.endpointUrl || 'http://localhost:1234').trim() || 'http://localhost:1234',
       port: String(lmStudio.port || '1234').trim() || '1234',
       activeModel: String(lmStudio.activeModel || ''),
+    },
+    llamaServer: {
+      selectedFlavor: allowedFlavor,
     },
   };
 };
@@ -141,6 +152,10 @@ const setAiAssistantSettings = (payload = {}) => {
       ...getAiAssistantSettings().lmStudio,
       ...(payload?.lmStudio || {}),
     },
+    llamaServer: {
+      ...getAiAssistantSettings().llamaServer,
+      ...(payload?.llamaServer || {}),
+    },
   });
 
   aiAssistantStore.set(merged);
@@ -148,27 +163,44 @@ const setAiAssistantSettings = (payload = {}) => {
 };
 
 const getLocalModelState = async () => {
-  await fsPromises.mkdir(MODELS_ROOT_DIR, { recursive: true });
+  const runtimePaths = getRuntimePaths(app);
+  const candidates = [runtimePaths.modelsDir, LEGACY_MODELS_ROOT_DIR];
+  const uniqueDirs = [...new Set(candidates.map((item) => path.resolve(item)))];
 
-  const entries = await fsPromises.readdir(MODELS_ROOT_DIR, { withFileTypes: true });
-  const models = entries
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.gguf'))
-    .map((entry) => {
-      const localPath = path.join(MODELS_ROOT_DIR, entry.name);
-      return {
+  await Promise.all(uniqueDirs.map(async (dirPath) => {
+    await fsPromises.mkdir(dirPath, { recursive: true });
+  }));
+
+  const modelMap = new Map();
+  for (const dirPath of uniqueDirs) {
+    const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.gguf')) {
+        continue;
+      }
+
+      const localPath = path.join(dirPath, entry.name);
+      const key = entry.name.toLowerCase();
+      if (modelMap.has(key)) {
+        continue;
+      }
+
+      modelMap.set(key, {
         id: entry.name,
         role: '',
         name: entry.name.replace(/\.gguf$/i, ''),
         fileName: entry.name,
         localPath,
         downloaded: true,
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
+      });
+    }
+  }
+
+  const models = Array.from(modelMap.values()).sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     models,
-    modelsDir: MODELS_ROOT_DIR,
+    modelsDir: runtimePaths.modelsDir,
   };
 };
 
@@ -350,12 +382,12 @@ const sendTerminalOutput = (terminalId, data) => {
 
 const killTerminalSession = (terminalId) => {
   const session = terminalSessions.get(terminalId);
-  if (!session?.process) {
+  if (!session?.pty) {
     return;
   }
 
   try {
-    session.process.kill();
+    session.pty.kill();
   } catch {
     // ignore shutdown errors
   }
@@ -365,7 +397,7 @@ const killTerminalSession = (terminalId) => {
 
 const resizeTerminalSession = (terminalId, cols = 100, rows = 30) => {
   const session = terminalSessions.get(terminalId);
-  if (!session?.process?.stdin || process.platform !== 'win32') {
+  if (!session?.pty) {
     return { ok: false };
   }
 
@@ -374,9 +406,11 @@ const resizeTerminalSession = (terminalId, cols = 100, rows = 30) => {
   session.cols = width;
   session.rows = height;
 
-  session.process.stdin.write(
-    `$size = $Host.UI.RawUI.WindowSize; $size.Width = ${width}; $size.Height = ${height}; $Host.UI.RawUI.WindowSize = $size\n`,
-  );
+  try {
+    session.pty.resize(width, height);
+  } catch {
+    return { ok: false };
+  }
 
   return {
     ok: true,
@@ -392,44 +426,33 @@ const initializeTerminalShell = (workspaceRoot, options = {}) => {
   const cwd = workspaceRoot || workspaceService.getWorkspaceRoot();
   const cols = Math.max(40, Number(options.cols || 100));
   const rows = Math.max(12, Number(options.rows || 30));
-  const shellCommand = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-  const shellArgs = process.platform === 'win32'
-    ? [
-        '-NoLogo',
-        '-NoExit',
-        '-Command',
-        `$size = $Host.UI.RawUI.WindowSize; $size.Width = ${cols}; $size.Height = ${rows}; $Host.UI.RawUI.WindowSize = $size; clear`,
-      ]
-    : [];
+  const shellCommand = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash';
+  const shellArgs = process.platform === 'win32' ? ['-NoLogo'] : [];
 
-  const shellProcess = spawn(shellCommand, shellArgs, {
+  const shellProcess = nodePty.spawn(shellCommand, shellArgs, {
+    name: 'xterm-256color',
+    cols,
+    rows,
     cwd,
     env: process.env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
   });
 
   terminalSessions.set(terminalId, {
-    process: shellProcess,
+    pty: shellProcess,
     cwd,
     cols,
     rows,
   });
 
-  shellProcess.stdout?.on('data', (data) => {
+  shellProcess.onData((data) => {
     sendTerminalOutput(terminalId, data);
   });
 
-  shellProcess.stderr?.on('data', (data) => {
-    sendTerminalOutput(terminalId, data);
-  });
-
-  shellProcess.on('error', (error) => {
-    sendTerminalOutput(terminalId, `\r\n[terminal error] ${error.message}\r\n`);
-  });
-
-  shellProcess.on('exit', () => {
-    if (terminalSessions.get(terminalId)?.process === shellProcess) {
+  shellProcess.onExit(({ exitCode, signal }) => {
+    if (exitCode || signal) {
+      sendTerminalOutput(terminalId, `\r\n[terminal exited] code=${exitCode} signal=${signal ?? 'none'}\r\n`);
+    }
+    if (terminalSessions.get(terminalId)?.pty === shellProcess) {
       terminalSessions.delete(terminalId);
     }
   });
@@ -495,10 +518,16 @@ const registerIpcHandlers = () => {
       preferredFlavor: flavor,
     });
 
+    setAiAssistantSettings({
+      llamaServer: {
+        selectedFlavor: flavor,
+      },
+    });
+
     return {
       ok: true,
       ...result,
-      flavor,
+      requestedFlavor: flavor,
     };
   });
   ipcMain.handle('lmstudio:get-models', async (_event, payload) => {
@@ -654,13 +683,15 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle('terminal-send-input', async (_event, payload) => {
     const terminalId = String(payload?.terminalId || 'terminal-1');
-    const command = String(payload?.command || '');
+    const command = String(payload?.command ?? '');
     const session = terminalSessions.get(terminalId);
-    if (!session?.process?.stdin || !command) {
+    if (!session?.pty) {
       return { ok: false };
     }
 
-    session.process.stdin.write(command.endsWith('\n') ? command : `${command}\n`);
+    if (command) {
+      session.pty.write(command);
+    }
     return { ok: true };
   });
 

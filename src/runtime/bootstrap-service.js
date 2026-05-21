@@ -600,9 +600,14 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
                     label: `llama-server installed in llama-server/${flavor} (${path.basename(foundExe)})`,
                     percent: 100,
                     inProgress: false,
+                    completed: true,
                 });
 
-                return;
+                return {
+                    installedFlavor: flavor,
+                    executablePath: foundExe,
+                    assetName: asset.name,
+                };
             } catch (error) {
                 installFailures.push(`${asset.name}: ${error.message}`);
             }

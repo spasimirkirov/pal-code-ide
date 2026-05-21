@@ -15,6 +15,9 @@ const defaultSettings = {
         port: '1234',
         activeModel: '',
     },
+    llamaServer: {
+        selectedFlavor: 'auto',
+    },
 };
 
 const LLAMA_SERVER_FLAVORS = [
@@ -33,6 +36,7 @@ function AiAssistantPanel() {
     const [llamaServers, setLlamaServers] = useState([]);
     const [selectedServerFlavor, setSelectedServerFlavor] = useState('auto');
     const [serverDownloading, setServerDownloading] = useState(false);
+    const [serverError, setServerError] = useState('');
     const [lmStudioModels, setLmStudioModels] = useState([]);
     const [lmStudioLoading, setLmStudioLoading] = useState(false);
     const [lmStudioError, setLmStudioError] = useState('');
@@ -62,6 +66,11 @@ function AiAssistantPanel() {
 
             const nextLocalModels = Array.isArray(localState?.models) ? localState.models : [];
             if (nextSettings) {
+                const savedFlavor = String(nextSettings.llamaServer?.selectedFlavor || 'auto').toLowerCase();
+                const selectedFlavor = LLAMA_SERVER_FLAVORS.some((item) => item.value === savedFlavor)
+                    ? savedFlavor
+                    : 'auto';
+
                 setSettings({
                     ...nextSettings,
                     roleMappings: {
@@ -69,7 +78,11 @@ function AiAssistantPanel() {
                         vision: resolveLocalModelPath(nextSettings.roleMappings?.vision, nextLocalModels),
                         autocomplete: resolveLocalModelPath(nextSettings.roleMappings?.autocomplete, nextLocalModels),
                     },
+                    llamaServer: {
+                        selectedFlavor,
+                    },
                 });
+                setSelectedServerFlavor(selectedFlavor);
 
                 const migrated = {
                     engine: nextSettings.engine,
@@ -79,6 +92,9 @@ function AiAssistantPanel() {
                         autocomplete: resolveLocalModelPath(nextSettings.roleMappings?.autocomplete, nextLocalModels),
                     },
                     lmStudio: nextSettings.lmStudio,
+                    llamaServer: {
+                        selectedFlavor,
+                    },
                 };
 
                 if (JSON.stringify(migrated) !== JSON.stringify(nextSettings)) {
@@ -134,14 +150,24 @@ function AiAssistantPanel() {
 
     const startLlamaServerDownload = async () => {
         try {
+            setServerError('');
             setServerDownloading(true);
             await runtime?.downloadLlamaServerVersion?.({ flavor: selectedServerFlavor });
             await hydrate();
         } catch (error) {
-            setLmStudioError(error?.message || 'Download failed.');
+            setServerError(error?.message || 'Download failed.');
         } finally {
             setServerDownloading(false);
         }
+    };
+
+    const handleFlavorChange = (value) => {
+        setSelectedServerFlavor(value);
+        void updateSettings({
+            llamaServer: {
+                selectedFlavor: value,
+            },
+        });
     };
 
     const refreshLmStudioModels = async () => {
@@ -172,8 +198,8 @@ function AiAssistantPanel() {
                     type="button"
                     onClick={() => setActiveSubTab('llama-server')}
                     className={`rounded-lg border px-2 py-1.5 font-medium transition ${activeSubTab === 'llama-server'
-                            ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                            : 'border-slate-700 bg-slate-900/70 text-slate-300'
+                        ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
+                        : 'border-slate-700 bg-slate-900/70 text-slate-300'
                         }`}
                 >
                     Llama.cpp Server
@@ -182,8 +208,8 @@ function AiAssistantPanel() {
                     type="button"
                     onClick={() => setActiveSubTab('lm-studio')}
                     className={`rounded-lg border px-2 py-1.5 font-medium transition ${activeSubTab === 'lm-studio'
-                            ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                            : 'border-slate-700 bg-slate-900/70 text-slate-300'
+                        ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
+                        : 'border-slate-700 bg-slate-900/70 text-slate-300'
                         }`}
                 >
                     LM Studio
@@ -210,7 +236,7 @@ function AiAssistantPanel() {
                                 <span className="mb-1 block text-[11px] text-slate-400">Select Version</span>
                                 <select
                                     value={selectedServerFlavor}
-                                    onChange={(event) => setSelectedServerFlavor(event.target.value)}
+                                    onChange={(event) => handleFlavorChange(event.target.value)}
                                     className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-100"
                                 >
                                     {LLAMA_SERVER_FLAVORS.map((item) => (
@@ -255,6 +281,11 @@ function AiAssistantPanel() {
                                 );
                             })}
                         </div>
+                        {serverError && (
+                            <p className="mt-3 rounded-md border border-rose-400/30 bg-rose-500/10 p-2 text-[11px] text-rose-200">
+                                {serverError}
+                            </p>
+                        )}
                     </div>
 
                     {loadingModels ? (

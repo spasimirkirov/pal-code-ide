@@ -16,6 +16,9 @@ const defaultAiSettings = {
         port: '1234',
         activeModel: '',
     },
+    llamaServer: {
+        selectedFlavor: 'auto',
+    },
 };
 
 const buildLmStudioBaseUrl = (settings) => {

@@ -1,0 +1,14 @@
+diff --git a/node_modules/@homebridge/node-pty-prebuilt-multiarch/binding.gyp b/node_modules/@homebridge/node-pty-prebuilt-multiarch/binding.gyp
+index 78ca0c4..ac82431 100644
+--- a/node_modules/@homebridge/node-pty-prebuilt-multiarch/binding.gyp
++++ b/node_modules/@homebridge/node-pty-prebuilt-multiarch/binding.gyp
+@@ -8,9 +8,6 @@
+     ],
+     'conditions': [
+       ['OS=="win"', {
+-        'msvs_configuration_attributes': {
+-          'SpectreMitigation': 'Spectre'
+-        },
+         'msvs_settings': {
+             'VCCLCompilerTool': {
+               'AdditionalOptions': [

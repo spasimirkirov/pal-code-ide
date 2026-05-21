@@ -22,8 +22,8 @@ function ActivityBar({ activeTab, onChangeTab }) {
                         onClick={() => onChangeTab(tab.id)}
                         title={tab.label}
                         className={`grid h-10 w-10 place-items-center rounded-xl border transition ${active
-                                ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                                : 'border-slate-700/70 bg-slate-900/70 text-slate-400 hover:text-slate-200'
+                            ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
+                            : 'border-slate-700/70 bg-slate-900/70 text-slate-400 hover:text-slate-200'
                             }`}
                     >
                         <Icon className="h-4.5 w-4.5" />

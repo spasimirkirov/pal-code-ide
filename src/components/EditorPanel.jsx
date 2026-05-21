@@ -20,7 +20,6 @@ function EditorPanel({
     const terminalContainerMapRef = useRef({});
     const terminalInstanceMapRef = useRef({});
     const fitAddonMapRef = useRef({});
-    const terminalInputBuffersRef = useRef({});
     const terminalCleanupMapRef = useRef({});
     const editorRef = useRef(null);
     const monacoRef = useRef(null);
@@ -233,7 +232,6 @@ function EditorPanel({
     const destroyTerminalInstance = (terminalId) => {
         terminalCleanupMapRef.current[terminalId]?.();
         delete terminalCleanupMapRef.current[terminalId];
-        delete terminalInputBuffersRef.current[terminalId];
         delete fitAddonMapRef.current[terminalId];
         delete terminalInstanceMapRef.current[terminalId];
     };
@@ -285,7 +283,8 @@ function EditorPanel({
                     return false;
                 }
 
-                return true;
+                void runtime?.terminalSendInput?.({ terminalId, command: '\u0003' });
+                return false;
             }
 
             if (event.ctrlKey && event.code === 'KeyV') {
@@ -303,7 +302,6 @@ function EditorPanel({
         term.open(container);
         terminalInstanceMapRef.current[terminalId] = term;
         fitAddonMapRef.current[terminalId] = fitAddon;
-        terminalInputBuffersRef.current[terminalId] = '';
 
         const handleTerminalPaste = async (event) => {
             if (event.button !== 2) {
@@ -328,27 +326,7 @@ function EditorPanel({
         };
 
         const dataSubscription = term.onData((input) => {
-            if (input === '\r') {
-                const line = terminalInputBuffersRef.current[terminalId] || '';
-                terminalInputBuffersRef.current[terminalId] = '';
-                term.write('\r\n');
-                void runtime?.terminalSendInput?.({ terminalId, command: line });
-                return;
-            }
-
-            if (input === '\u007F') {
-                const current = terminalInputBuffersRef.current[terminalId] || '';
-                if (current.length > 0) {
-                    terminalInputBuffersRef.current[terminalId] = current.slice(0, -1);
-                    term.write('\b \b');
-                }
-                return;
-            }
-
-            if (input.length === 1) {
-                terminalInputBuffersRef.current[terminalId] = `${terminalInputBuffersRef.current[terminalId] || ''}${input}`;
-                term.write(input);
-            }
+            void runtime?.terminalSendInput?.({ terminalId, command: input });
         });
 
         container.addEventListener('mousedown', handleTerminalPaste);
