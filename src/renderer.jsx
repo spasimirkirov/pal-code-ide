@@ -1,22 +1,39 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LoaderCircle, DownloadCloud } from 'lucide-react';
 import EditorPanel from './components/EditorPanel';
+import ChatPanel from './components/ChatPanel';
+import GitDiffPanel from './components/GitDiffPanel';
 import DatabaseViewerPanel from './components/database/DatabaseViewerPanel';
 import IdeTitleBar from './components/chrome/IdeTitleBar';
 import SidebarPanel from './components/sidebar/SidebarPanel';
 import './index.css';
 
 const runtime = window.palRuntime;
+const DEFAULT_PANE_DIMENSIONS = {
+    leftSidebarWidth: 360,
+    rightChatWidth: 432,
+    terminalHeightRatio: 0.27,
+};
 
 function App() {
+    const saveTimerRef = useRef(null);
     const [editorCode, setEditorCode] = useState(
         '# PAL IDE\n# Ask the agent to generate or refactor code here.\n\nprint("Hello from PAL IDE")\n',
     );
     const [activeFilePath, setActiveFilePath] = useState('untitled.py');
     const [activeView, setActiveView] = useState('editor');
     const [activeTableName, setActiveTableName] = useState('');
+    const [gitDiffState, setGitDiffState] = useState({
+        filePath: '',
+        original: '',
+        modified: '',
+    });
+    const [chatVisible, setChatVisible] = useState(true);
     const [isWindowMaximized, setIsWindowMaximized] = useState(true);
+    const [paneDimensions, setPaneDimensions] = useState({
+        ...DEFAULT_PANE_DIMENSIONS,
+    });
     const [workspaceRoot, setWorkspaceRoot] = useState('');
     const [hardware, setHardware] = useState({ vramUsed: 0, vramTotal: 0 });
     const [modelPerf, setModelPerf] = useState({
@@ -176,6 +193,18 @@ function App() {
             });
         }
 
+        if (runtime?.getAppearanceSettings) {
+            void runtime.getAppearanceSettings().then((payload) => {
+                if (!isMounted || !payload?.paneDimensions) {
+                    return;
+                }
+                setPaneDimensions((current) => ({
+                    ...current,
+                    ...payload.paneDimensions,
+                }));
+            });
+        }
+
         void runBootstrap();
 
         void hydrateRuntime();
@@ -195,6 +224,73 @@ function App() {
             window.clearInterval(pollId);
         };
     }, []);
+
+    const persistPaneDimensions = (next) => {
+        if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+        }
+
+        saveTimerRef.current = setTimeout(() => {
+            void runtime?.setAppearanceSettings?.({
+                paneDimensions: next,
+            });
+        }, 180);
+    };
+
+    const updatePaneDimensions = (partial) => {
+        setPaneDimensions((current) => {
+            const next = {
+                ...current,
+                ...partial,
+            };
+            persistPaneDimensions(next);
+            return next;
+        });
+    };
+
+    const handleResetLayout = () => {
+        const next = { ...DEFAULT_PANE_DIMENSIONS };
+        setPaneDimensions(next);
+        persistPaneDimensions(next);
+    };
+
+    const startLeftResize = (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidth = paneDimensions.leftSidebarWidth;
+
+        const onMove = (moveEvent) => {
+            const nextWidth = Math.max(280, Math.min(780, startWidth + (moveEvent.clientX - startX)));
+            updatePaneDimensions({ leftSidebarWidth: nextWidth });
+        };
+
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    };
+
+    const startRightResize = (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidth = paneDimensions.rightChatWidth;
+
+        const onMove = (moveEvent) => {
+            const nextWidth = Math.max(320, Math.min(860, startWidth - (moveEvent.clientX - startX)));
+            updatePaneDimensions({ rightChatWidth: nextWidth });
+        };
+
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    };
 
     const formatContext = (value) => {
         if (value >= 1000) {
@@ -284,6 +380,20 @@ function App() {
         setActiveView('database');
     };
 
+    const handleOpenGitDiff = async (filePath) => {
+        if (!runtime?.gitGetDiffContent || !filePath) {
+            return;
+        }
+
+        const payload = await runtime.gitGetDiffContent({ filePath });
+        setGitDiffState({
+            filePath: payload?.filePath || filePath,
+            original: payload?.original || '',
+            modified: payload?.modified || '',
+        });
+        setActiveView('git-diff');
+    };
+
     const handleNewFile = () => {
         setActiveFilePath('untitled.py');
         setEditorCode('');
@@ -309,9 +419,22 @@ function App() {
         await runtime?.closeWindow?.();
     };
 
+    const handleApplyCode = (incomingCode, mode = 'overwrite') => {
+        if (!incomingCode) {
+            return;
+        }
+
+        setActiveView('editor');
+        if (mode === 'insert') {
+            setEditorCode((current) => `${current}\n\n${incomingCode}`.trim());
+            return;
+        }
+
+        setEditorCode(incomingCode);
+    };
+
     return (
-        <div className="relative flex h-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_20%,rgba(43,209,255,0.16)_0%,transparent_45%),radial-gradient(circle_at_88%_30%,rgba(255,209,102,0.12)_0%,transparent_40%),linear-gradient(150deg,#030712_0%,#081126_48%,#050a17_100%)]" />
+        <div className="futuristic-shell relative flex h-screen flex-col overflow-hidden bg-[#0b0f1a] text-slate-100">
 
             <IdeTitleBar
                 activeFilePath={activeView === 'database' ? `Database: ${activeTableName || 'Viewer'}` : activeFilePath}
@@ -325,46 +448,88 @@ function App() {
                 onRefreshGit={() => {
                     window.dispatchEvent(new CustomEvent('pal:git-refresh'));
                 }}
+                chatVisible={chatVisible}
+                onToggleChat={() => setChatVisible((current) => !current)}
+                onResetLayout={handleResetLayout}
                 isMaximized={isWindowMaximized}
                 onWindowMinimize={handleWindowMinimize}
                 onWindowToggleMaximize={handleWindowToggleMaximize}
                 onWindowClose={handleWindowClose}
             />
 
-            <div className="relative z-10 flex items-center justify-between border-b border-slate-800/70 bg-slate-950/40 px-5 py-2 text-xs text-slate-300">
+            <div className="glass-chrome relative z-10 flex h-7 items-center justify-between border-b px-3 text-[11px] text-slate-300">
                 <p className="truncate">{llama.message || 'Runtime status unavailable.'}</p>
                 <p className="ml-4 shrink-0 text-slate-400">{workspaceRoot || 'workspace: unknown'}</p>
             </div>
 
-            <main className="relative z-10 flex min-h-0 flex-1 w-full gap-4 p-4">
-                <section className="w-full md:w-[30%] lg:w-[26%]">
+            <main className="relative z-10 flex min-h-0 flex-1 w-full">
+                <section className="glass-chrome shrink-0 border-r" style={{ width: `${paneDimensions.leftSidebarWidth}px` }}>
                     <SidebarPanel
                         workspaceRoot={workspaceRoot}
                         onFileOpen={handleFileOpen}
                         onOpenDatabaseTable={handleOpenDatabaseTable}
+                        onOpenGitDiff={handleOpenGitDiff}
                     />
                 </section>
-                <section className="hidden min-w-0 md:block md:w-[70%] lg:w-[74%]">
+
+                <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    onMouseDown={startLeftResize}
+                    className="w-1 shrink-0 cursor-col-resize bg-transparent transition hover:bg-cyan-300/25"
+                    title="Resize sidebar"
+                />
+
+                <section className="glass-chrome min-w-0 flex-1 border-x">
                     {activeView === 'database' ? (
                         <DatabaseViewerPanel tableName={activeTableName} />
+                    ) : activeView === 'git-diff' ? (
+                        <GitDiffPanel
+                            filePath={gitDiffState.filePath}
+                            original={gitDiffState.original}
+                            modified={gitDiffState.modified}
+                        />
                     ) : (
                         <EditorPanel
                             code={editorCode}
                             onChangeCode={setEditorCode}
                             activeFilePath={activeFilePath}
                             onModelMetricsUpdate={handleModelMetricsUpdate}
+                            terminalHeightRatio={paneDimensions.terminalHeightRatio}
+                            onTerminalHeightRatioChange={(terminalHeightRatio) => {
+                                updatePaneDimensions({ terminalHeightRatio });
+                            }}
                         />
                     )}
                 </section>
+
+                {chatVisible && (
+                    <>
+                        <div
+                            role="separator"
+                            aria-orientation="vertical"
+                            onMouseDown={startRightResize}
+                            className="w-1 shrink-0 cursor-col-resize bg-transparent transition hover:bg-cyan-300/25"
+                            title="Resize chat"
+                        />
+                        <section className="glass-chrome shrink-0 border-l" style={{ width: `${paneDimensions.rightChatWidth}px` }}>
+                        <ChatPanel
+                            workspaceRoot={workspaceRoot}
+                            onApplyCode={handleApplyCode}
+                            onModelMetricsUpdate={handleModelMetricsUpdate}
+                        />
+                        </section>
+                    </>
+                )}
             </main>
 
-            <footer className="relative z-10 flex h-8 items-center justify-end border-t border-slate-800/70 bg-slate-950/55 px-4 text-[11px] text-slate-300">
+            <footer className="glass-chrome relative z-10 flex h-6 items-center justify-end border-t px-3 text-[11px] text-slate-300">
                 <div className="flex items-center gap-4">
                     <div className="min-w-[190px]">
-                        <p className="mb-1 text-slate-400">
+                        <p className="mb-0.5 text-slate-400">
                             VRAM: {(hardware.vramUsed / 1024).toFixed(1)} / {(hardware.vramTotal / 1024).toFixed(1)} GB
                         </p>
-                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-slate-800">
                             <div
                                 className="h-full rounded-full bg-gradient-to-r from-cyan-300/80 to-teal-300/80"
                                 style={{ width: `${vramPercent}%` }}

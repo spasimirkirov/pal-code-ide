@@ -192,18 +192,18 @@ function DatabaseViewerPanel({ tableName }) {
 
     if (!tableName) {
         return (
-            <div className="flex h-full items-center justify-center rounded-3xl border border-edge bg-panel/85 text-sm text-slate-400">
+            <div className="flex h-full items-center justify-center bg-[#0f1319] text-sm text-slate-400">
                 Select a table from Database Explorer.
             </div>
         );
     }
 
     return (
-        <div className="relative flex h-full flex-col overflow-hidden rounded-3xl border border-edge bg-panel/85 shadow-glow">
-            <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+        <div className="relative flex h-full flex-col overflow-hidden bg-[#0f1319]">
+            <div className="flex h-8 items-center justify-between border-b border-slate-800 px-3">
                 <div className="flex items-center gap-2 text-cyan-100">
                     <Database className="h-4 w-4" />
-                    <h2 className="text-sm font-semibold tracking-[0.12em]">Database Viewer</h2>
+                    <h2 className="text-xs font-semibold tracking-[0.08em]">Database Viewer</h2>
                 </div>
                 <div className="flex items-center gap-2">
                     <div className="rounded-md border border-slate-700/70 bg-slate-900/70 px-2 py-1 text-xs text-slate-300">

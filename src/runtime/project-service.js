@@ -144,10 +144,91 @@ export const createProjectService = ({ getWorkspaceRoot }) => {
         };
     };
 
+    const stageFile = async ({ filePath }) => {
+        const target = String(filePath || '').trim();
+        if (!target) {
+            throw new Error('filePath is required.');
+        }
+
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+        await git.add([target]);
+
+        return {
+            staged: true,
+            filePath: target,
+        };
+    };
+
+    const unstageFile = async ({ filePath }) => {
+        const target = String(filePath || '').trim();
+        if (!target) {
+            throw new Error('filePath is required.');
+        }
+
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+        await git.reset(['HEAD', target]);
+
+        return {
+            unstaged: true,
+            filePath: target,
+        };
+    };
+
+    const revertFile = async ({ filePath }) => {
+        const target = String(filePath || '').trim();
+        if (!target) {
+            throw new Error('filePath is required.');
+        }
+
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+        await git.checkout([target]);
+
+        return {
+            reverted: true,
+            filePath: target,
+        };
+    };
+
+    const getDiffContent = async ({ filePath }) => {
+        const target = String(filePath || '').trim();
+        if (!target) {
+            throw new Error('filePath is required.');
+        }
+
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+
+        let original = '';
+        try {
+            original = await git.show([`HEAD:${target}`]);
+        } catch {
+            original = '';
+        }
+
+        let modified = '';
+        const absolutePath = normalizeInsideRoot(root, path.join(root, target));
+        if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile()) {
+            modified = fs.readFileSync(absolutePath, 'utf-8');
+        }
+
+        return {
+            filePath: target,
+            original,
+            modified,
+        };
+    };
+
     return {
         listProjectTree,
         readProjectFile,
         getGitStatus,
         commitChanges,
+        stageFile,
+        unstageFile,
+        revertFile,
+        getDiffContent,
     };
 };

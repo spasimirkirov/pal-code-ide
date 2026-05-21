@@ -1,6 +1,10 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import si from 'systeminformation';
+import Store from 'electron-store';
 import started from 'electron-squirrel-startup';
 import { getRuntimePaths } from './runtime/runtime-paths';
 import { createWorkspaceService } from './runtime/workspace-service';
@@ -19,6 +23,228 @@ let hardwareMonitorTimer = null;
 let hardwareSnapshot = {
   vramUsed: 0,
   vramTotal: 0,
+};
+const terminalSessions = new Map();
+let terminalSessionCounter = 1;
+
+const MODELS_ROOT_DIR = path.join(app.getPath('appData'), 'pal-ide', 'models');
+
+const dbProfilesStore = new Store({
+  name: 'pal-code-ide-store',
+  encryptionKey:
+    process.env.PAL_STORE_ENCRYPTION_KEY ||
+    'pal-code-ide-local-encryption-key',
+  defaults: {
+    databaseConnections: [],
+  },
+});
+
+const appearanceStore = new Store({
+  name: 'appearance',
+  cwd: path.join(app.getPath('appData'), 'PalCode', 'settings'),
+  defaults: {
+    paneDimensions: {
+      leftSidebarWidth: 360,
+      rightChatWidth: 432,
+      terminalHeightRatio: 0.27,
+    },
+  },
+});
+
+const aiAssistantStore = new Store({
+  name: 'ai-assistant',
+  cwd: path.join(app.getPath('appData'), 'pal-ide', 'settings'),
+  defaults: {
+    engine: 'llama-server',
+    roleMappings: {
+      coding: '',
+      vision: '',
+      autocomplete: '',
+    },
+    lmStudio: {
+      endpointUrl: 'http://localhost:1234',
+      port: '1234',
+      activeModel: '',
+    },
+  },
+});
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const sanitizePaneDimensions = (input = {}) => ({
+  leftSidebarWidth: clamp(Number(input.leftSidebarWidth || 360), 280, 780),
+  rightChatWidth: clamp(Number(input.rightChatWidth || 432), 320, 860),
+  terminalHeightRatio: clamp(Number(input.terminalHeightRatio || 0.27), 0.16, 0.45),
+});
+
+const getPaneDimensions = () => {
+  const saved = appearanceStore.get('paneDimensions', {});
+  return sanitizePaneDimensions(saved || {});
+};
+
+const setPaneDimensions = (payload = {}) => {
+  const current = getPaneDimensions();
+  const next = sanitizePaneDimensions({
+    ...current,
+    ...(payload || {}),
+  });
+
+  appearanceStore.set('paneDimensions', next);
+  return next;
+};
+
+const getSavedDatabaseConnections = () => {
+  const entries = dbProfilesStore.get('databaseConnections', []);
+  return Array.isArray(entries) ? entries : [];
+};
+
+const normalizeDbProfile = (payload = {}) => ({
+  alias: String(payload.alias || '').trim(),
+  host: String(payload.host || '').trim(),
+  port: Number(payload.port || 3306),
+  user: String(payload.user || '').trim(),
+  password: String(payload.password || ''),
+  database: String(payload.database || '').trim(),
+  updatedAt: new Date().toISOString(),
+});
+
+const sanitizeAiAssistantSettings = (input = {}) => {
+  const roleMappings = input?.roleMappings || {};
+  const lmStudio = input?.lmStudio || {};
+
+  return {
+    engine: String(input?.engine || 'llama-server') === 'lm-studio' ? 'lm-studio' : 'llama-server',
+    roleMappings: {
+      coding: String(roleMappings.coding || ''),
+      vision: String(roleMappings.vision || ''),
+      autocomplete: String(roleMappings.autocomplete || ''),
+    },
+    lmStudio: {
+      endpointUrl: String(lmStudio.endpointUrl || 'http://localhost:1234').trim() || 'http://localhost:1234',
+      port: String(lmStudio.port || '1234').trim() || '1234',
+      activeModel: String(lmStudio.activeModel || ''),
+    },
+  };
+};
+
+const getAiAssistantSettings = () => sanitizeAiAssistantSettings(aiAssistantStore.store || {});
+
+const setAiAssistantSettings = (payload = {}) => {
+  const merged = sanitizeAiAssistantSettings({
+    ...getAiAssistantSettings(),
+    ...(payload || {}),
+    roleMappings: {
+      ...getAiAssistantSettings().roleMappings,
+      ...(payload?.roleMappings || {}),
+    },
+    lmStudio: {
+      ...getAiAssistantSettings().lmStudio,
+      ...(payload?.lmStudio || {}),
+    },
+  });
+
+  aiAssistantStore.set(merged);
+  return merged;
+};
+
+const getLocalModelState = async () => {
+  await fsPromises.mkdir(MODELS_ROOT_DIR, { recursive: true });
+
+  const entries = await fsPromises.readdir(MODELS_ROOT_DIR, { withFileTypes: true });
+  const models = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.gguf'))
+    .map((entry) => {
+      const localPath = path.join(MODELS_ROOT_DIR, entry.name);
+      return {
+        id: entry.name,
+        role: '',
+        name: entry.name.replace(/\.gguf$/i, ''),
+        fileName: entry.name,
+        localPath,
+        downloaded: true,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return {
+    models,
+    modelsDir: MODELS_ROOT_DIR,
+  };
+};
+
+const getLocalLlamaServers = async () => {
+  const paths = getRuntimePaths(app);
+  await fsPromises.mkdir(paths.llamaServerDir, { recursive: true });
+
+  const activeManifestPath = path.join(paths.llamaServerDir, 'active.json');
+  let active = null;
+  if (fs.existsSync(activeManifestPath)) {
+    try {
+      active = JSON.parse(await fsPromises.readFile(activeManifestPath, 'utf-8'));
+    } catch {
+      active = null;
+    }
+  }
+
+  const flavors = ['cpu', 'cuda', 'vulkan'];
+  const versions = await Promise.all(
+    flavors.map(async (flavor) => {
+      const executablePath = await findFirstExecutable(paths.llamaServerDir, flavor);
+      return {
+        flavor,
+        installed: Boolean(executablePath),
+        executablePath: executablePath || '',
+        active: String(active?.flavor || '').toLowerCase() === flavor,
+      };
+    }),
+  );
+
+  return {
+    llamaServerDir: paths.llamaServerDir,
+    active: active || null,
+    versions,
+  };
+};
+
+async function findFirstExecutable(startDir, flavor) {
+  if (!fs.existsSync(startDir)) {
+    return null;
+  }
+
+  const entries = await fsPromises.readdir(startDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(startDir, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase() === 'llama-server.exe') {
+      if (!flavor || fullPath.toLowerCase().includes(flavor)) {
+        return fullPath;
+      }
+    }
+    if (entry.isDirectory()) {
+      const nested = await findFirstExecutable(fullPath, flavor);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
+}
+
+const buildLmStudioModelsUrl = (input = {}) => {
+  const rawBase = String(input?.endpointUrl || 'http://localhost:1234').trim() || 'http://localhost:1234';
+  const port = String(input?.port || '').trim();
+  const normalizedBase = /^https?:\/\//i.test(rawBase) ? rawBase : `http://${rawBase}`;
+  const url = new URL(normalizedBase);
+
+  if (port) {
+    url.port = port;
+  }
+
+  url.pathname = '/v1/models';
+  url.search = '';
+  url.hash = '';
+
+  return url.toString();
 };
 
 const workspaceService = createWorkspaceService(process.cwd());
@@ -111,27 +337,253 @@ const stopHardwareMonitor = () => {
   }
 };
 
+const buildTerminalId = () => `terminal-${terminalSessionCounter++}`;
+
+const sendTerminalOutput = (terminalId, data) => {
+  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+    mainWindowRef.webContents.send('terminal-get-output', {
+      terminalId,
+      data: String(data || ''),
+    });
+  }
+};
+
+const killTerminalSession = (terminalId) => {
+  const session = terminalSessions.get(terminalId);
+  if (!session?.process) {
+    return;
+  }
+
+  try {
+    session.process.kill();
+  } catch {
+    // ignore shutdown errors
+  }
+
+  terminalSessions.delete(terminalId);
+};
+
+const resizeTerminalSession = (terminalId, cols = 100, rows = 30) => {
+  const session = terminalSessions.get(terminalId);
+  if (!session?.process?.stdin || process.platform !== 'win32') {
+    return { ok: false };
+  }
+
+  const width = Math.max(40, Number(cols || 100));
+  const height = Math.max(12, Number(rows || 30));
+  session.cols = width;
+  session.rows = height;
+
+  session.process.stdin.write(
+    `$size = $Host.UI.RawUI.WindowSize; $size.Width = ${width}; $size.Height = ${height}; $Host.UI.RawUI.WindowSize = $size\n`,
+  );
+
+  return {
+    ok: true,
+    cols: width,
+    rows: height,
+  };
+};
+
+const initializeTerminalShell = (workspaceRoot, options = {}) => {
+  const terminalId = String(options.terminalId || buildTerminalId());
+  killTerminalSession(terminalId);
+
+  const cwd = workspaceRoot || workspaceService.getWorkspaceRoot();
+  const cols = Math.max(40, Number(options.cols || 100));
+  const rows = Math.max(12, Number(options.rows || 30));
+  const shellCommand = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+  const shellArgs = process.platform === 'win32'
+    ? [
+        '-NoLogo',
+        '-NoExit',
+        '-Command',
+        `$size = $Host.UI.RawUI.WindowSize; $size.Width = ${cols}; $size.Height = ${rows}; $Host.UI.RawUI.WindowSize = $size; clear`,
+      ]
+    : [];
+
+  const shellProcess = spawn(shellCommand, shellArgs, {
+    cwd,
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  terminalSessions.set(terminalId, {
+    process: shellProcess,
+    cwd,
+    cols,
+    rows,
+  });
+
+  shellProcess.stdout?.on('data', (data) => {
+    sendTerminalOutput(terminalId, data);
+  });
+
+  shellProcess.stderr?.on('data', (data) => {
+    sendTerminalOutput(terminalId, data);
+  });
+
+  shellProcess.on('error', (error) => {
+    sendTerminalOutput(terminalId, `\r\n[terminal error] ${error.message}\r\n`);
+  });
+
+  shellProcess.on('exit', () => {
+    if (terminalSessions.get(terminalId)?.process === shellProcess) {
+      terminalSessions.delete(terminalId);
+    }
+  });
+
+  return {
+    ok: true,
+    terminalId,
+    cwd,
+  };
+};
+
+const shouldBlockDevShortcut = (input) => {
+  if (!app.isPackaged || !input) {
+    return false;
+  }
+
+  const key = String(input.key || '').toLowerCase();
+  const code = String(input.code || '').toLowerCase();
+  const acceleratorPressed = Boolean(input.control || input.meta);
+
+  return (
+    key === 'f12' ||
+    code === 'f12' ||
+    (acceleratorPressed && input.shift && key === 'i') ||
+    (acceleratorPressed && key === 'r')
+  );
+};
+
 const registerIpcHandlers = () => {
   ipcMain.handle('runtime:getWorkspaceRoot', async () => ({
     cwd: workspaceService.getWorkspaceRoot(),
   }));
-  ipcMain.handle('runtime:setWorkspaceRoot', async (_event, payload) => ({
-    cwd: workspaceService.setWorkspaceRoot(payload?.cwd),
-  }));
+  ipcMain.handle('runtime:setWorkspaceRoot', async (_event, payload) => {
+    const previous = workspaceService.getWorkspaceRoot();
+    const next = workspaceService.setWorkspaceRoot(payload?.cwd);
+
+    if (previous !== next) {
+      const existingSessionIds = Array.from(terminalSessions.keys());
+      for (const terminalId of existingSessionIds) {
+        initializeTerminalShell(next, { terminalId });
+      }
+    }
+
+    return {
+      cwd: next,
+    };
+  });
   ipcMain.handle('runtime:bootstrap', runtimeBootstrapService.ensureRuntimeAssets);
   ipcMain.handle('runtime:cancelBootstrap', runtimeBootstrapService.cancelRuntimeBootstrap);
   ipcMain.handle('runtime:getHardwareMetrics', async () => hardwareSnapshot);
+  ipcMain.handle('ai:get-settings', async () => getAiAssistantSettings());
+  ipcMain.handle('ai:set-settings', async (_event, payload) => setAiAssistantSettings(payload || {}));
+  ipcMain.handle('check-local-models', async () => getLocalModelState());
+  ipcMain.handle('check-local-llama-servers', async () => getLocalLlamaServers());
+  ipcMain.handle('download-llama-server-version', async (_event, payload) => {
+    const flavor = String(payload?.flavor || 'auto').toLowerCase();
+    const paths = getRuntimePaths(app);
+    await fsPromises.mkdir(paths.llamaServerDir, { recursive: true });
+    await fsPromises.mkdir(paths.tempDir, { recursive: true });
+
+    const result = await runtimeBootstrapService.installLlamaServerVersion({
+      paths,
+      preferredFlavor: flavor,
+    });
+
+    return {
+      ok: true,
+      ...result,
+      flavor,
+    };
+  });
+  ipcMain.handle('lmstudio:get-models', async (_event, payload) => {
+    const url = buildLmStudioModelsUrl(payload || {});
+    const response = await fetch(url, { method: 'GET' });
+    if (!response.ok) {
+      throw new Error(`LM Studio request failed with status ${response.status}`);
+    }
+
+    const parsed = await response.json();
+    const source = Array.isArray(parsed?.data) ? parsed.data : Array.isArray(parsed) ? parsed : [];
+    const models = source
+      .map((entry) => ({
+        id: String(entry?.id || entry?.model || '').trim(),
+      }))
+      .filter((entry) => Boolean(entry.id));
+
+    return {
+      endpoint: url,
+      models,
+    };
+  });
+  ipcMain.handle('settings:getAppearance', async () => ({
+    paneDimensions: getPaneDimensions(),
+  }));
+  ipcMain.handle('settings:setAppearance', async (_event, payload) => ({
+    paneDimensions: setPaneDimensions(payload?.paneDimensions || {}),
+  }));
   ipcMain.handle('project:listTree', async () => projectService.listProjectTree());
   ipcMain.handle('project:readFile', async (_event, payload) => projectService.readProjectFile(payload || {}));
 
   ipcMain.handle('git:status', async () => projectService.getGitStatus());
   ipcMain.handle('git:commit', async (_event, payload) => projectService.commitChanges(payload || {}));
+  ipcMain.handle('git-stage-file', async (_event, payload) => projectService.stageFile(payload || {}));
+  ipcMain.handle('git-unstage-file', async (_event, payload) => projectService.unstageFile(payload || {}));
+  ipcMain.handle('git-revert-file', async (_event, payload) => projectService.revertFile(payload || {}));
+  ipcMain.handle('git-get-diff-content', async (_event, payload) => projectService.getDiffContent(payload || {}));
 
   ipcMain.handle('database-connect', async (_event, payload) => databaseService.connect(payload || {}));
   ipcMain.handle('database-get-tables', async () => databaseService.getTables());
   ipcMain.handle('db-fetch-rows', async (_event, payload) => databaseService.fetchRows(payload || {}));
   ipcMain.handle('db-delete-row', async (_event, payload) => databaseService.deleteRow(payload || {}));
   ipcMain.handle('db-insert-row', async (_event, payload) => databaseService.insertRow(payload || {}));
+  ipcMain.handle('db-save-connection', async (_event, payload) => {
+    const profile = normalizeDbProfile(payload || {});
+
+    if (!profile.alias) {
+      throw new Error('Connection alias is required.');
+    }
+
+    if (!profile.host || !profile.user || !profile.database) {
+      throw new Error('host, user, and database are required.');
+    }
+
+    const existing = getSavedDatabaseConnections();
+    const nextProfiles = [
+      profile,
+      ...existing.filter((entry) => String(entry?.alias || '').toLowerCase() !== profile.alias.toLowerCase()),
+    ];
+
+    dbProfilesStore.set('databaseConnections', nextProfiles);
+    return {
+      saved: true,
+      profiles: nextProfiles,
+    };
+  });
+  ipcMain.handle('db-get-saved-connections', async () => ({
+    profiles: getSavedDatabaseConnections(),
+  }));
+  ipcMain.handle('db-delete-connection', async (_event, payload) => {
+    const alias = String(payload?.alias || '').trim();
+    if (!alias) {
+      throw new Error('Connection alias is required.');
+    }
+
+    const remaining = getSavedDatabaseConnections().filter(
+      (entry) => String(entry?.alias || '').toLowerCase() !== alias.toLowerCase(),
+    );
+
+    dbProfilesStore.set('databaseConnections', remaining);
+    return {
+      deleted: true,
+      profiles: remaining,
+    };
+  });
 
   ipcMain.handle('llama:status', llamaService.getLlamaStatus);
   ipcMain.handle('llama:start', llamaService.startLlama);
@@ -184,6 +636,59 @@ const registerIpcHandlers = () => {
     }
     return { maximized: win.isMaximized() };
   });
+
+  ipcMain.handle('terminal-create', async (_event, payload) =>
+    initializeTerminalShell(workspaceService.getWorkspaceRoot(), {
+      terminalId: payload?.terminalId,
+      cols: payload?.cols,
+      rows: payload?.rows,
+    }),
+  );
+
+  ipcMain.handle('terminal-list', async () => ({
+    terminals: Array.from(terminalSessions.entries()).map(([terminalId, session]) => ({
+      terminalId,
+      cwd: session.cwd,
+    })),
+  }));
+
+  ipcMain.handle('terminal-send-input', async (_event, payload) => {
+    const terminalId = String(payload?.terminalId || 'terminal-1');
+    const command = String(payload?.command || '');
+    const session = terminalSessions.get(terminalId);
+    if (!session?.process?.stdin || !command) {
+      return { ok: false };
+    }
+
+    session.process.stdin.write(command.endsWith('\n') ? command : `${command}\n`);
+    return { ok: true };
+  });
+
+  ipcMain.handle('terminal-resize', async (_event, payload) =>
+    resizeTerminalSession(
+      String(payload?.terminalId || 'terminal-1'),
+      Number(payload?.cols || 100),
+      Number(payload?.rows || 30),
+    ),
+  );
+
+  ipcMain.handle('terminal-close', async (_event, payload) => {
+    const terminalId = String(payload?.terminalId || '');
+    if (!terminalId) {
+      return { ok: false };
+    }
+
+    killTerminalSession(terminalId);
+    return { ok: true };
+  });
+
+  ipcMain.handle('terminal-restart-shell', async (_event, payload) =>
+    initializeTerminalShell(workspaceService.getWorkspaceRoot(), {
+      terminalId: payload?.terminalId || 'terminal-1',
+      cols: payload?.cols,
+      rows: payload?.rows,
+    }),
+  );
 };
 
 const createWindow = () => {
@@ -197,7 +702,24 @@ const createWindow = () => {
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      devTools: !app.isPackaged,
     },
+  });
+
+  if (app.isPackaged) {
+    mainWindow.removeMenu();
+  }
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (shouldBlockDevShortcut(input)) {
+      event.preventDefault();
+    }
+  });
+
+  mainWindow.webContents.on('devtools-opened', () => {
+    if (app.isPackaged) {
+      mainWindow.webContents.closeDevTools();
+    }
   });
 
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
@@ -227,6 +749,8 @@ const createWindow = () => {
   mainWindow.on('unmaximize', emitWindowState);
   mainWindow.on('enter-full-screen', emitWindowState);
   mainWindow.on('leave-full-screen', emitWindowState);
+
+  initializeTerminalShell(workspaceService.getWorkspaceRoot(), { terminalId: 'terminal-1' });
 
   startHardwareMonitor();
 
@@ -258,6 +782,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   stopHardwareMonitor();
+  for (const terminalId of Array.from(terminalSessions.keys())) {
+    killTerminalSession(terminalId);
+  }
   await databaseService.disconnect();
   await llamaService.shutdown();
 });

@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ChevronDown,
     Maximize2,
+    MessageSquare,
     Minimize2,
     Minus,
     Square,
@@ -10,19 +11,13 @@ import {
 
 const runtime = window.palRuntime;
 
-function MenuDropdown({ label, items, onAction }) {
-    const [open, setOpen] = useState(false);
+function MenuDropdown({ label, items, open, onToggle, onAction }) {
 
     return (
-        <div
-            className="relative"
-            onMouseEnter={() => setOpen(true)}
-            onMouseLeave={() => setOpen(false)}
-            style={{ WebkitAppRegion: 'no-drag' }}
-        >
+        <div className="relative" style={{ WebkitAppRegion: 'no-drag' }}>
             <button
                 type="button"
-                onClick={() => setOpen((value) => !value)}
+                onClick={() => onToggle(label)}
                 className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-slate-300 hover:bg-slate-800/80 hover:text-slate-100"
             >
                 {label}
@@ -36,7 +31,6 @@ function MenuDropdown({ label, items, onAction }) {
                             key={`${label}-${item.id}`}
                             type="button"
                             onClick={() => {
-                                setOpen(false);
                                 onAction(item.id);
                             }}
                             className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-slate-200 hover:bg-slate-800"
@@ -61,11 +55,36 @@ function IdeTitleBar({
     onNewFile,
     onOpenDatabaseView,
     onRefreshGit,
+    chatVisible,
+    onToggleChat,
+    onResetLayout,
     isMaximized,
     onWindowMinimize,
     onWindowToggleMaximize,
     onWindowClose,
 }) {
+    const [openMenu, setOpenMenu] = useState(null);
+    const menuContainerRef = useRef(null);
+
+    useEffect(() => {
+        const handleOutsidePointer = (event) => {
+            if (!menuContainerRef.current) {
+                return;
+            }
+
+            if (!menuContainerRef.current.contains(event.target)) {
+                setOpenMenu(null);
+            }
+        };
+
+        window.addEventListener('pointerdown', handleOutsidePointer);
+        return () => window.removeEventListener('pointerdown', handleOutsidePointer);
+    }, []);
+
+    const handleToggleMenu = (label) => {
+        setOpenMenu((current) => (current === label ? null : label));
+    };
+
     const menuItems = useMemo(
         () => ({
             File: [
@@ -79,6 +98,8 @@ function IdeTitleBar({
             ],
             View: [
                 { id: 'toggle-db', label: 'Toggle Database View' },
+                { id: 'toggle-chat', label: chatVisible ? 'Hide Chat Panel' : 'Show Chat Panel' },
+                { id: 'reset-layout', label: 'Reset Layout' },
                 { id: 'toggle-max', label: 'Toggle Maximize', hint: 'F11' },
             ],
             Terminal: [
@@ -89,10 +110,12 @@ function IdeTitleBar({
                 { id: 'about', label: 'About PAL IDE' },
             ],
         }),
-        [isRunning],
+        [chatVisible, isRunning],
     );
 
     const handleMenuAction = async (action) => {
+        setOpenMenu(null);
+
         if (action === 'new-file') {
             onNewFile?.();
             return;
@@ -100,6 +123,16 @@ function IdeTitleBar({
 
         if (action === 'open-db' || action === 'toggle-db') {
             onOpenDatabaseView?.();
+            return;
+        }
+
+        if (action === 'toggle-chat') {
+            onToggleChat?.();
+            return;
+        }
+
+        if (action === 'reset-layout') {
+            onResetLayout?.();
             return;
         }
 
@@ -133,9 +166,16 @@ function IdeTitleBar({
                     <Square className="h-3.5 w-3.5" />
                 </div>
 
-                <div className="flex items-center gap-0.5">
+                <div ref={menuContainerRef} className="flex items-center gap-0.5">
                     {Object.entries(menuItems).map(([label, items]) => (
-                        <MenuDropdown key={label} label={label} items={items} onAction={handleMenuAction} />
+                        <MenuDropdown
+                            key={label}
+                            label={label}
+                            items={items}
+                            open={openMenu === label}
+                            onToggle={handleToggleMenu}
+                            onAction={handleMenuAction}
+                        />
                     ))}
                 </div>
 
@@ -152,6 +192,15 @@ function IdeTitleBar({
                     className="rounded-md border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-cyan-100 hover:bg-cyan-300/20 disabled:opacity-60"
                 >
                     {isStarting ? 'Starting...' : isStopping ? 'Stopping...' : isRunning ? 'Stop Llama' : 'Start Llama'}
+                </button>
+
+                <button
+                    type="button"
+                    onClick={() => onToggleChat?.()}
+                    className={`grid h-7 w-8 place-items-center rounded-md ${chatVisible ? 'bg-cyan-300/15 text-cyan-100' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+                    title={chatVisible ? 'Hide Chat' : 'Show Chat'}
+                >
+                    <MessageSquare className="h-3.5 w-3.5" />
                 </button>
 
                 <button

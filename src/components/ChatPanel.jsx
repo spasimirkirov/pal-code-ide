@@ -1,8 +1,72 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, Bolt, SendHorizontal, Sparkles, User } from 'lucide-react';
 
-const CHAT_API_URL = 'http://127.0.0.1:8008/api/chat';
 const runtime = window.palRuntime;
+const LLAMA_CHAT_BASE_URL = 'http://127.0.0.1:1234';
+
+const defaultAiSettings = {
+    engine: 'llama-server',
+    roleMappings: {
+        coding: '',
+        vision: '',
+        autocomplete: '',
+    },
+    lmStudio: {
+        endpointUrl: 'http://localhost:1234',
+        port: '1234',
+        activeModel: '',
+    },
+};
+
+const buildLmStudioBaseUrl = (settings) => {
+    const rawBase = String(settings?.lmStudio?.endpointUrl || 'http://localhost:1234').trim() || 'http://localhost:1234';
+    const normalizedBase = /^https?:\/\//i.test(rawBase) ? rawBase : `http://${rawBase}`;
+    const url = new URL(normalizedBase);
+    const port = String(settings?.lmStudio?.port || '').trim();
+    if (port) {
+        url.port = port;
+    }
+    url.pathname = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+};
+
+const normalizeModelId = (value) => {
+    const text = String(value || '').trim();
+    if (!text) {
+        return '';
+    }
+
+    return text.split(/[\\/]/).pop() || text;
+};
+
+const requestOpenAiStyleChat = async ({ baseUrl, model, prompt }) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            model: model || undefined,
+            stream: false,
+            messages: [
+                {
+                    role: 'user',
+                    content: prompt,
+                },
+            ],
+        }),
+    });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.response ?? data?.text ?? '';
+    return String(content || '');
+};
 
 const extractCodeBlocks = (text) => {
     if (!text) {
@@ -32,7 +96,28 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
     ]);
     const [prompt, setPrompt] = useState('');
     const [isSending, setIsSending] = useState(false);
+    const [aiSettings, setAiSettings] = useState(defaultAiSettings);
     const viewportRef = useRef(null);
+
+    useEffect(() => {
+        let mounted = true;
+
+        const hydrate = async () => {
+            try {
+                const settings = await runtime?.getAiAssistantSettings?.();
+                if (mounted && settings) {
+                    setAiSettings(settings);
+                }
+            } catch {
+                // Keep defaults on settings load failure.
+            }
+        };
+
+        void hydrate();
+        return () => {
+            mounted = false;
+        };
+    }, []);
 
     const autoScroll = () => {
         if (!viewportRef.current) {
@@ -111,59 +196,22 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
         ]);
 
         try {
-            let streamedText = '';
-            const response = await fetch(CHAT_API_URL, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    prompt: effectivePrompt,
-                    stream: true,
-                    workspace_path: workspaceRoot || undefined,
-                }),
+            const engine = aiSettings.engine === 'lm-studio' ? 'lm-studio' : 'llama-server';
+            const targetBaseUrl = engine === 'lm-studio' ? buildLmStudioBaseUrl(aiSettings) : LLAMA_CHAT_BASE_URL;
+            const targetModel =
+                engine === 'lm-studio'
+                    ? normalizeModelId(aiSettings?.lmStudio?.activeModel)
+                    : normalizeModelId(aiSettings?.roleMappings?.coding);
+
+            const streamedText = await requestOpenAiStyleChat({
+                baseUrl: targetBaseUrl,
+                model: targetModel,
+                prompt: effectivePrompt,
             });
 
-            if (!response.ok) {
-                throw new Error(`Request failed with status ${response.status}`);
-            }
-
-            if (!response.body) {
-                const data = await response.json();
-                const nonStreamed = data?.response ?? data?.text ?? 'No response body was returned.';
-                streamedText = String(nonStreamed || '');
-                appendChunk(assistantId, nonStreamed);
-                finishAssistant(assistantId);
-                setTimeout(autoScroll, 0);
-                const responseTokens = Math.max(1, Math.round(streamedText.length / 4));
-                const promptTokens = Math.max(1, Math.round(effectivePrompt.length / 4));
-                const elapsedSec = Math.max(0.1, (performance.now() - startedAt) / 1000);
-                onModelMetricsUpdate?.({
-                    tokensPerSec: Number((responseTokens / elapsedSec).toFixed(1)),
-                    contextUsed: promptTokens + responseTokens,
-                    contextTotal: 32000,
-                });
-                return;
-            }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-
-                const chunk = decoder.decode(value, { stream: true });
-                if (chunk) {
-                    streamedText += chunk;
-                    appendChunk(assistantId, chunk);
-                    setTimeout(autoScroll, 0);
-                }
-            }
-
+            appendChunk(assistantId, streamedText || 'No response text was returned.');
             finishAssistant(assistantId);
+            setTimeout(autoScroll, 0);
 
             const responseTokens = Math.max(1, Math.round(streamedText.length / 4));
             const promptTokens = Math.max(1, Math.round(effectivePrompt.length / 4));
@@ -201,9 +249,9 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
                 return (
                     <article
                         key={message.id}
-                        className={`rounded-2xl border p-3 shadow-sm ${isUser
-                            ? 'ml-8 border-cyan-400/30 bg-cyan-400/10'
-                            : 'mr-8 border-slate-700/70 bg-slate-900/80'
+                        className={`border p-2 ${isUser
+                            ? 'ml-6 border-cyan-400/30 bg-cyan-400/8'
+                            : 'mr-6 border-slate-700/70 bg-slate-900/70'
                             }`}
                     >
                         <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.12em] text-slate-400">
@@ -248,29 +296,43 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
     );
 
     return (
-        <div className="flex h-full flex-col overflow-hidden rounded-3xl border border-edge bg-panel/85 shadow-glow">
-            <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+        <div className="flex h-full flex-col overflow-hidden bg-[#0f1319]">
+            <div className="flex h-8 items-center justify-between border-b border-slate-800 px-3">
                 <div>
-                    <h2 className="text-sm font-semibold tracking-[0.12em] text-cyan-100">Agent Chat</h2>
-                    <p className="text-xs text-slate-400">Streaming intelligence channel</p>
+                    <h2 className="text-xs font-semibold tracking-[0.08em] text-cyan-100">Agent Chat</h2>
                 </div>
-                <div className="rounded-full border border-cyan-300/30 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200">
-                    local:8008
+                <div className="flex items-center gap-2">
+                    <label className="text-[10px] uppercase tracking-[0.08em] text-slate-400">🤖 Engine</label>
+                    <select
+                        value={aiSettings.engine}
+                        onChange={(event) => {
+                            const engine = event.target.value;
+                            setAiSettings((current) => ({
+                                ...current,
+                                engine,
+                            }));
+                            void runtime?.setAiAssistantSettings?.({ engine });
+                        }}
+                        className="rounded-md border border-cyan-300/30 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] text-cyan-100"
+                    >
+                        <option value="llama-server">Llama Server</option>
+                        <option value="lm-studio">LM Studio</option>
+                    </select>
                 </div>
             </div>
 
-            <div ref={viewportRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+            <div ref={viewportRef} className="flex-1 space-y-2 overflow-y-auto p-2">
                 {renderedMessages}
             </div>
 
-            <form onSubmit={sendPrompt} className="border-t border-edge bg-panelSoft/70 p-3">
+            <form onSubmit={sendPrompt} className="border-t border-slate-800 bg-[#0d1218] p-2">
                 <div className="flex items-end gap-2">
                     <textarea
                         value={prompt}
                         onChange={(event) => setPrompt(event.target.value)}
-                        rows={2}
+                        rows={4}
                         placeholder="Ask PAL to generate, refactor, or patch code... Use /web <query> for search context."
-                        className="max-h-40 min-h-[52px] flex-1 resize-y rounded-xl border border-slate-700/80 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-300/45"
+                        className="max-h-72 min-h-[104px] flex-1 resize-y rounded-xl border border-slate-700/80 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-300/45"
                     />
                     <button
                         type="submit"

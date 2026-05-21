@@ -1,10 +1,11 @@
 import React from 'react';
-import { Database, Files, GitBranch } from 'lucide-react';
+import { Database, Files, GitBranch, Sparkles } from 'lucide-react';
 
 const tabs = [
     { id: 'files', label: 'File Explorer', icon: Files },
     { id: 'git', label: 'Source Control', icon: GitBranch },
     { id: 'database', label: 'Database Explorer', icon: Database },
+    { id: 'ai', label: 'AI Assistant', icon: Sparkles },
 ];
 
 function ActivityBar({ activeTab, onChangeTab }) {

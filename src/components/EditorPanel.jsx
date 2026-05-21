@@ -1,22 +1,36 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { Code2, TerminalSquare } from 'lucide-react';
+import { Code2, Plus, TerminalSquare, X } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 
 const INLINE_COMPLETION_URL = 'http://127.0.0.1:1234/v1/completions';
+const runtime = window.palRuntime;
 
-function EditorPanel({ code, onChangeCode, activeFilePath = 'untitled.py', onModelMetricsUpdate }) {
-    const terminalContainerRef = useRef(null);
-    const terminalRef = useRef(null);
-    const fitAddonRef = useRef(null);
+function EditorPanel({
+    code,
+    onChangeCode,
+    activeFilePath = 'untitled.py',
+    onModelMetricsUpdate,
+    terminalHeightRatio = 0.27,
+    onTerminalHeightRatioChange,
+}) {
+    const terminalWrapRef = useRef(null);
+    const terminalContainerMapRef = useRef({});
+    const terminalInstanceMapRef = useRef({});
+    const fitAddonMapRef = useRef({});
+    const terminalInputBuffersRef = useRef({});
+    const terminalCleanupMapRef = useRef({});
     const editorRef = useRef(null);
     const monacoRef = useRef(null);
     const inlineSuggestionRef = useRef({ text: '', lineNumber: 1, column: 1 });
     const inlineRequestCounterRef = useRef(0);
     const inlineTimerRef = useRef(null);
     const inlineDisposablesRef = useRef([]);
+    const [terminals, setTerminals] = useState([{ id: 'terminal-1', title: 'Terminal 1' }]);
+    const [activeTerminalId, setActiveTerminalId] = useState('terminal-1');
+    const activeTerminalIdRef = useRef('terminal-1');
 
     const disposeInlineCompletions = () => {
         for (const item of inlineDisposablesRef.current) {
@@ -188,11 +202,47 @@ function EditorPanel({ code, onChangeCode, activeFilePath = 'untitled.py', onMod
     }, []);
 
     useEffect(() => {
-        if (!terminalContainerRef.current || terminalRef.current) {
+        activeTerminalIdRef.current = activeTerminalId;
+    }, [activeTerminalId]);
+
+    const fitAndSyncTerminal = (terminalId) => {
+        const fitAddon = fitAddonMapRef.current[terminalId];
+        const terminal = terminalInstanceMapRef.current[terminalId];
+        const container = terminalContainerMapRef.current[terminalId];
+        if (!fitAddon || !terminal || !container) {
             return;
         }
 
-        let disposed = false;
+        if (!container.clientWidth || !container.clientHeight) {
+            return;
+        }
+
+        try {
+            fitAddon.fit();
+        } catch {
+            return;
+        }
+
+        void runtime?.terminalResize?.({
+            terminalId,
+            cols: terminal.cols,
+            rows: terminal.rows,
+        });
+    };
+
+    const destroyTerminalInstance = (terminalId) => {
+        terminalCleanupMapRef.current[terminalId]?.();
+        delete terminalCleanupMapRef.current[terminalId];
+        delete terminalInputBuffersRef.current[terminalId];
+        delete fitAddonMapRef.current[terminalId];
+        delete terminalInstanceMapRef.current[terminalId];
+    };
+
+    const mountTerminalInstance = (terminalId) => {
+        const container = terminalContainerMapRef.current[terminalId];
+        if (!container || terminalInstanceMapRef.current[terminalId]) {
+            return;
+        }
 
         const fitAddon = new FitAddon();
         const term = new Terminal({
@@ -222,67 +272,182 @@ function EditorPanel({ code, onChangeCode, activeFilePath = 'untitled.py', onMod
             },
         });
 
-        const safeFit = () => {
-            if (disposed || !terminalContainerRef.current || !terminalRef.current || !fitAddonRef.current) {
+        term.loadAddon(fitAddon);
+        term.attachCustomKeyEventHandler((event) => {
+            if (event.type !== 'keydown') {
+                return true;
+            }
+
+            if (event.ctrlKey && event.code === 'KeyC') {
+                if (term.hasSelection()) {
+                    void navigator.clipboard.writeText(term.getSelection());
+                    term.clearSelection();
+                    return false;
+                }
+
+                return true;
+            }
+
+            if (event.ctrlKey && event.code === 'KeyV') {
+                void navigator.clipboard.readText().then((text) => {
+                    if (text) {
+                        void runtime?.terminalSendInput?.({ terminalId, command: text });
+                    }
+                });
+                return false;
+            }
+
+            return true;
+        });
+
+        term.open(container);
+        terminalInstanceMapRef.current[terminalId] = term;
+        fitAddonMapRef.current[terminalId] = fitAddon;
+        terminalInputBuffersRef.current[terminalId] = '';
+
+        const handleTerminalPaste = async (event) => {
+            if (event.button !== 2) {
                 return;
             }
 
-            const { clientWidth, clientHeight } = terminalContainerRef.current;
-            if (!clientWidth || !clientHeight) {
-                return;
-            }
+            event.preventDefault();
+            event.stopPropagation();
 
             try {
-                fitAddonRef.current.fit();
+                const text = await navigator.clipboard.readText();
+                if (text) {
+                    void runtime?.terminalSendInput?.({ terminalId, command: text });
+                }
             } catch {
-                // Ignore intermittent fit errors during rapid mount/unmount/layout changes.
+                // Ignore clipboard failures during paste.
             }
         };
 
-        term.loadAddon(fitAddon);
-        terminalRef.current = term;
-        fitAddonRef.current = fitAddon;
-
-        term.open(terminalContainerRef.current);
-        requestAnimationFrame(safeFit);
-
-        term.writeln('PAL runtime terminal initialized.');
-        term.writeln('Tip: wire this pane to your PTY bridge in preload/main process.');
-        term.prompt = () => term.write('\r\n$ ');
-        term.prompt();
+        const handleContextMenu = (event) => {
+            event.preventDefault();
+        };
 
         const dataSubscription = term.onData((input) => {
             if (input === '\r') {
-                term.prompt();
-            } else if (input === '\u007F') {
-                term.write('\b \b');
-            } else {
+                const line = terminalInputBuffersRef.current[terminalId] || '';
+                terminalInputBuffersRef.current[terminalId] = '';
+                term.write('\r\n');
+                void runtime?.terminalSendInput?.({ terminalId, command: line });
+                return;
+            }
+
+            if (input === '\u007F') {
+                const current = terminalInputBuffersRef.current[terminalId] || '';
+                if (current.length > 0) {
+                    terminalInputBuffersRef.current[terminalId] = current.slice(0, -1);
+                    term.write('\b \b');
+                }
+                return;
+            }
+
+            if (input.length === 1) {
+                terminalInputBuffersRef.current[terminalId] = `${terminalInputBuffersRef.current[terminalId] || ''}${input}`;
                 term.write(input);
             }
         });
 
-        const resizeObserver = new ResizeObserver(() => {
-            requestAnimationFrame(safeFit);
+        container.addEventListener('mousedown', handleTerminalPaste);
+        container.addEventListener('contextmenu', handleContextMenu);
+
+        terminalCleanupMapRef.current[terminalId] = () => {
+            dataSubscription.dispose();
+            container.removeEventListener('mousedown', handleTerminalPaste);
+            container.removeEventListener('contextmenu', handleContextMenu);
+            term.dispose();
+        };
+
+        void runtime?.terminalCreate?.({
+            terminalId,
+            cols: term.cols,
+            rows: term.rows,
+        });
+        requestAnimationFrame(() => fitAndSyncTerminal(terminalId));
+    };
+
+    useEffect(() => {
+        mountTerminalInstance(activeTerminalId);
+
+        const outputUnsubscribe = runtime?.onTerminalOutput?.((payload) => {
+            const terminalId = typeof payload === 'string'
+                ? activeTerminalIdRef.current
+                : String(payload?.terminalId || activeTerminalIdRef.current);
+            const data = typeof payload === 'string' ? payload : String(payload?.data || '');
+
+            if (!terminalInstanceMapRef.current[terminalId]) {
+                setTerminals((current) => {
+                    if (current.some((item) => item.id === terminalId)) {
+                        return current;
+                    }
+
+                    const nextIndex = current.length + 1;
+                    return [...current, { id: terminalId, title: `Terminal ${nextIndex}` }];
+                });
+                return;
+            }
+
+            terminalInstanceMapRef.current[terminalId].write(data);
         });
 
-        resizeObserver.observe(terminalContainerRef.current);
+        const resizeObserver = new ResizeObserver(() => {
+            requestAnimationFrame(() => fitAndSyncTerminal(activeTerminalIdRef.current));
+        });
+
+        if (terminalWrapRef.current) {
+            resizeObserver.observe(terminalWrapRef.current);
+        }
 
         return () => {
-            disposed = true;
             resizeObserver.disconnect();
-            dataSubscription.dispose();
-            term.dispose();
-            terminalRef.current = null;
-            fitAddonRef.current = null;
+            if (outputUnsubscribe) {
+                outputUnsubscribe();
+            }
+
+            for (const terminalId of Object.keys(terminalCleanupMapRef.current)) {
+                destroyTerminalInstance(terminalId);
+            }
         };
     }, []);
 
+    useEffect(() => {
+        requestAnimationFrame(() => mountTerminalInstance(activeTerminalId));
+        requestAnimationFrame(() => fitAndSyncTerminal(activeTerminalId));
+    }, [activeTerminalId, terminals.length]);
+
+    const createTerminal = () => {
+        const nextIndex = terminals.length + 1;
+        const terminalId = `terminal-${Date.now()}`;
+        setTerminals((current) => [...current, { id: terminalId, title: `Terminal ${nextIndex}` }]);
+        setActiveTerminalId(terminalId);
+    };
+
+    const closeTerminal = (terminalId) => {
+        if (terminals.length === 1) {
+            return;
+        }
+
+        destroyTerminalInstance(terminalId);
+        void runtime?.terminalClose?.({ terminalId });
+
+        setTerminals((current) => {
+            const next = current.filter((item) => item.id !== terminalId);
+            if (activeTerminalId === terminalId && next.length) {
+                setActiveTerminalId(next[next.length - 1].id);
+            }
+            return next;
+        });
+    };
+
     return (
-        <div className="flex h-full flex-col overflow-hidden rounded-3xl border border-edge bg-panel/85 shadow-glow">
-            <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+        <div className="flex h-full flex-col overflow-hidden bg-[#0f1319]">
+            <div className="flex h-8 items-center justify-between border-b border-slate-800 px-3">
                 <div className="flex items-center gap-2 text-cyan-100">
                     <Code2 className="h-4 w-4" />
-                    <h2 className="text-sm font-semibold tracking-[0.12em]">Workspace Editor</h2>
+                    <h2 className="text-xs font-semibold tracking-[0.08em]">Workspace Editor</h2>
                 </div>
                 <div className="max-w-[65%] truncate text-xs text-slate-400" title={activeFilePath}>
                     {activeFilePath}
@@ -316,12 +481,105 @@ function EditorPanel({ code, onChangeCode, activeFilePath = 'untitled.py', onMod
                     />
                 </div>
 
-                <div className="h-[30%] min-h-[170px] bg-[#050811]">
-                    <div className="flex h-8 items-center gap-2 border-b border-edge/70 px-3 text-xs uppercase tracking-[0.1em] text-slate-400">
-                        <TerminalSquare className="h-3.5 w-3.5 text-cyan-300" />
-                        Terminal
+                <div
+                    onMouseDown={(event) => {
+                        event.preventDefault();
+
+                        const container = terminalWrapRef.current?.parentElement;
+                        if (!container) {
+                            return;
+                        }
+
+                        const totalHeight = container.clientHeight || 1;
+                        const startY = event.clientY;
+                        const startRatio = terminalHeightRatio;
+
+                        const onMove = (moveEvent) => {
+                            const deltaRatio = (moveEvent.clientY - startY) / totalHeight;
+                            const nextRatio = Math.max(0.16, Math.min(0.45, startRatio - deltaRatio));
+                            onTerminalHeightRatioChange?.(nextRatio);
+                        };
+
+                        const onUp = () => {
+                            window.removeEventListener('mousemove', onMove);
+                            window.removeEventListener('mouseup', onUp);
+                        };
+
+                        window.addEventListener('mousemove', onMove);
+                        window.addEventListener('mouseup', onUp);
+                    }}
+                    className="h-1 cursor-row-resize bg-transparent transition hover:bg-cyan-300/25"
+                    title="Resize terminal"
+                />
+
+                <div ref={terminalWrapRef} className="min-h-[170px] bg-[#0a0f16]" style={{ height: `${Math.round(terminalHeightRatio * 100)}%` }}>
+                    <div className="flex h-8 items-center justify-between gap-2 border-b border-slate-800 px-2 text-[11px] text-slate-400">
+                        <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
+                            <span className="inline-flex items-center gap-1 px-2 uppercase tracking-[0.08em] text-cyan-300">
+                                <TerminalSquare className="h-3.5 w-3.5" />
+                                Terminal
+                            </span>
+                            {terminals.map((terminal) => {
+                                const active = terminal.id === activeTerminalId;
+                                return (
+                                    <button
+                                        key={terminal.id}
+                                        type="button"
+                                        onClick={() => setActiveTerminalId(terminal.id)}
+                                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${active
+                                            ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
+                                            : 'border-slate-700/80 bg-slate-900/70 text-slate-300'
+                                            }`}
+                                    >
+                                        {terminal.title}
+                                        {terminals.length > 1 && (
+                                            <span
+                                                role="button"
+                                                tabIndex={0}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    closeTerminal(terminal.id);
+                                                }}
+                                                onKeyDown={(event) => {
+                                                    if (event.key === 'Enter' || event.key === ' ') {
+                                                        event.preventDefault();
+                                                        event.stopPropagation();
+                                                        closeTerminal(terminal.id);
+                                                    }
+                                                }}
+                                                className="rounded p-0.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                                            >
+                                                <X className="h-3 w-3" />
+                                            </span>
+                                        )}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={createTerminal}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900/70 px-2 py-0.5 text-[11px] text-slate-300 hover:text-cyan-100"
+                            title="New terminal"
+                        >
+                            <Plus className="h-3 w-3" /> New
+                        </button>
                     </div>
-                    <div ref={terminalContainerRef} className="h-[calc(100%-32px)] w-full px-2 py-1" />
+                    <div className="h-[calc(100%-32px)] w-full px-1 py-1">
+                        {terminals.map((terminal) => (
+                            <div
+                                key={terminal.id}
+                                ref={(element) => {
+                                    if (element) {
+                                        terminalContainerMapRef.current[terminal.id] = element;
+                                    } else {
+                                        delete terminalContainerMapRef.current[terminal.id];
+                                    }
+                                }}
+                                className={`h-full w-full ${terminal.id === activeTerminalId ? 'block' : 'hidden'}`}
+                            />
+                        ))}
+                    </div>
                 </div>
             </div>
         </div>

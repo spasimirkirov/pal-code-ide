@@ -8,6 +8,96 @@ declare global {
             bootstrapRuntime: () => Promise<Record<string, unknown>>;
             cancelBootstrapRuntime: () => Promise<Record<string, unknown>>;
             getHardwareMetrics: () => Promise<{ vramUsed: number; vramTotal: number }>;
+            getAiAssistantSettings: () => Promise<{
+                engine: 'llama-server' | 'lm-studio';
+                roleMappings: {
+                    coding: string;
+                    vision: string;
+                    autocomplete: string;
+                };
+                lmStudio: {
+                    endpointUrl: string;
+                    port: string;
+                    activeModel: string;
+                };
+            }>;
+            setAiAssistantSettings: (payload: {
+                engine?: 'llama-server' | 'lm-studio';
+                roleMappings?: Partial<{
+                    coding: string;
+                    vision: string;
+                    autocomplete: string;
+                }>;
+                lmStudio?: Partial<{
+                    endpointUrl: string;
+                    port: string;
+                    activeModel: string;
+                }>;
+            }) => Promise<{
+                engine: 'llama-server' | 'lm-studio';
+                roleMappings: {
+                    coding: string;
+                    vision: string;
+                    autocomplete: string;
+                };
+                lmStudio: {
+                    endpointUrl: string;
+                    port: string;
+                    activeModel: string;
+                };
+            }>;
+            checkLocalModels: () => Promise<{
+                modelsDir: string;
+                models: Array<{
+                    id: string;
+                    role: string;
+                    name: string;
+                    fileName: string;
+                    localPath: string;
+                    downloaded: boolean;
+                }>;
+            }>;
+            checkLocalLlamaServers: () => Promise<{
+                llamaServerDir: string;
+                active: Record<string, unknown> | null;
+                versions: Array<{
+                    flavor: 'cpu' | 'cuda' | 'vulkan';
+                    installed: boolean;
+                    executablePath: string;
+                    active: boolean;
+                }>;
+            }>;
+            downloadLlamaServerVersion: (payload: { flavor: 'auto' | 'cpu' | 'cuda' | 'vulkan' }) => Promise<{
+                ok: boolean;
+                flavor: string;
+            }>;
+            lmStudioGetModels: (payload: {
+                endpointUrl?: string;
+                port?: string;
+            }) => Promise<{
+                endpoint: string;
+                models: Array<{ id: string }>;
+            }>;
+            getAppearanceSettings: () => Promise<{
+                paneDimensions: {
+                    leftSidebarWidth: number;
+                    rightChatWidth: number;
+                    terminalHeightRatio: number;
+                };
+            }>;
+            setAppearanceSettings: (payload: {
+                paneDimensions: Partial<{
+                    leftSidebarWidth: number;
+                    rightChatWidth: number;
+                    terminalHeightRatio: number;
+                }>;
+            }) => Promise<{
+                paneDimensions: {
+                    leftSidebarWidth: number;
+                    rightChatWidth: number;
+                    terminalHeightRatio: number;
+                };
+            }>;
             listProjectTree: () => Promise<{
                 root: string;
                 tree: Array<{
@@ -32,6 +122,23 @@ declare global {
             gitCommit: (payload: { message: string }) => Promise<{
                 commit: string;
                 summary: unknown;
+            }>;
+            gitStageFile: (payload: { filePath: string }) => Promise<{
+                staged: boolean;
+                filePath: string;
+            }>;
+            gitUnstageFile: (payload: { filePath: string }) => Promise<{
+                unstaged: boolean;
+                filePath: string;
+            }>;
+            gitRevertFile: (payload: { filePath: string }) => Promise<{
+                reverted: boolean;
+                filePath: string;
+            }>;
+            gitGetDiffContent: (payload: { filePath: string }) => Promise<{
+                filePath: string;
+                original: string;
+                modified: string;
             }>;
             databaseConnect: (payload: {
                 host: string;
@@ -60,6 +167,67 @@ declare global {
                 insertId: number;
                 affectedRows: number;
             }>;
+            dbSaveConnection: (payload: {
+                alias: string;
+                host: string;
+                port?: number;
+                user: string;
+                password?: string;
+                database: string;
+            }) => Promise<{
+                saved: boolean;
+                profiles: Array<{
+                    alias: string;
+                    host: string;
+                    port: number;
+                    user: string;
+                    password: string;
+                    database: string;
+                    updatedAt: string;
+                }>;
+            }>;
+            dbGetSavedConnections: () => Promise<{
+                profiles: Array<{
+                    alias: string;
+                    host: string;
+                    port: number;
+                    user: string;
+                    password: string;
+                    database: string;
+                    updatedAt: string;
+                }>;
+            }>;
+            dbDeleteConnection: (payload: { alias: string }) => Promise<{
+                deleted: boolean;
+                profiles: Array<{
+                    alias: string;
+                    host: string;
+                    port: number;
+                    user: string;
+                    password: string;
+                    database: string;
+                    updatedAt: string;
+                }>;
+            }>;
+            terminalCreate: (payload?: {
+                terminalId?: string;
+                cols?: number;
+                rows?: number;
+            }) => Promise<{ ok: boolean; terminalId: string; cwd: string }>;
+            terminalList: () => Promise<{
+                terminals: Array<{
+                    terminalId: string;
+                    cwd: string;
+                }>;
+            }>;
+            terminalSendInput: (payload: { terminalId?: string; command: string }) => Promise<{ ok: boolean }>;
+            terminalResize: (payload: { terminalId: string; cols: number; rows: number }) => Promise<{ ok: boolean }>;
+            terminalClose: (payload: { terminalId: string }) => Promise<{ ok: boolean }>;
+            terminalRestartShell: (payload?: {
+                terminalId?: string;
+                cols?: number;
+                rows?: number;
+            }) => Promise<{ ok: boolean; terminalId: string; cwd: string }>;
             minimizeWindow: () => Promise<{ ok: boolean }>;
             toggleMaximizeWindow: () => Promise<{ ok: boolean; maximized: boolean }>;
             closeWindow: () => Promise<{ ok: boolean }>;
@@ -78,7 +246,23 @@ declare global {
                 }) => void,
             ) => () => void;
             onHardwareMetrics: (listener: (payload: { vramUsed: number; vramTotal: number }) => void) => () => void;
+            onModelDownloadProgress: (
+                listener: (payload: {
+                    modelId: string;
+                    inProgress?: boolean;
+                    completed?: boolean;
+                    error?: boolean;
+                    message?: string;
+                    percent?: number;
+                    downloadedBytes?: number;
+                    totalBytes?: number;
+                    filePath?: string;
+                }) => void,
+            ) => () => void;
             onWindowMaximizedChanged: (listener: (payload: { maximized: boolean }) => void) => () => void;
+            onTerminalOutput: (
+                listener: (payload: { terminalId: string; data: string } | string) => void,
+            ) => () => void;
             llamaStatus: () => Promise<{
                 status: string;
                 ready: boolean;

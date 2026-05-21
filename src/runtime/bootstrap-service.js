@@ -433,7 +433,7 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
         throw new Error(`All model download sources failed for ${label}. ${failures.join(' | ')}`);
     };
 
-    const pickLlamaWindowsAsset = (assets) => {
+    const pickLlamaWindowsAsset = (assets, preferredFlavor = 'auto') => {
         const zipAssets = assets.filter((asset) => {
             const name = String(asset?.name || '').toLowerCase();
             return name.includes('win') && name.endsWith('.zip') && name.includes('bin');
@@ -459,11 +459,12 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
             }
         };
 
+        const selectedFlavor = String(preferredFlavor || LLAMA_BINARY_FLAVOR || 'auto').toLowerCase();
         const prefersCuda =
-            LLAMA_BINARY_FLAVOR === 'cuda' ||
-            (LLAMA_BINARY_FLAVOR === 'auto' && detectNvidiaGpuAvailable());
-        const prefersVulkan = LLAMA_BINARY_FLAVOR === 'vulkan';
-        const prefersCpu = LLAMA_BINARY_FLAVOR === 'cpu';
+            selectedFlavor === 'cuda' ||
+            (selectedFlavor === 'auto' && (LLAMA_BINARY_FLAVOR === 'cuda' || detectNvidiaGpuAvailable()));
+        const prefersVulkan = selectedFlavor === 'vulkan' || LLAMA_BINARY_FLAVOR === 'vulkan';
+        const prefersCpu = selectedFlavor === 'cpu' || LLAMA_BINARY_FLAVOR === 'cpu';
 
         const scoreAsset = (asset) => {
             const name = String(asset.name || '').toLowerCase();
@@ -488,7 +489,13 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
             return score;
         };
 
-        return zipAssets.sort((a, b) => scoreAsset(b) - scoreAsset(a));
+        const sortedAssets = zipAssets.sort((a, b) => scoreAsset(b) - scoreAsset(a));
+        if (selectedFlavor !== 'auto') {
+            const exactMatches = sortedAssets.filter((asset) => String(asset.name || '').toLowerCase().includes(selectedFlavor));
+            return exactMatches.length ? exactMatches : sortedAssets;
+        }
+
+        return sortedAssets;
     };
 
     const resolveFlavorFromAssetName = (assetName) => {
@@ -502,7 +509,7 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
         return 'cpu';
     };
 
-    const installLatestLlamaServer = async ({ paths, signal }) => {
+    const installLlamaServerVersion = async ({ paths, signal, preferredFlavor = 'auto' }) => {
         const release = await fetch(LLAMA_RELEASE_API, {
             signal,
             headers: {
@@ -516,7 +523,7 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
         }
 
         const releaseJson = await release.json();
-        const assetCandidates = pickLlamaWindowsAsset(releaseJson.assets || []);
+        const assetCandidates = pickLlamaWindowsAsset(releaseJson.assets || [], preferredFlavor);
         if (!assetCandidates?.length) {
             throw new Error('Could not find a Windows llama-server release asset.');
         }
@@ -634,61 +641,6 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
                 inProgress: true,
             });
 
-            if (!(await isLlamaServerInstalled(paths))) {
-                await installLatestLlamaServer({ paths, signal });
-            } else {
-                sendDownloadProgress({
-                    stage: 'llama-server',
-                    label: 'llama-server already installed',
-                    percent: 100,
-                    inProgress: false,
-                });
-            }
-
-            if (!(await fileExists(paths.coderModel))) {
-                const coderCandidates = await resolveModelDownloadCandidates({
-                    repos: CODER_MODEL_REPOS,
-                    preferredPatterns: [/q4_k_m\.gguf$/i, /q4.*\.gguf$/i],
-                    signal,
-                });
-                await downloadModelWithFallback({
-                    candidates: coderCandidates,
-                    destinationPath: paths.coderModel,
-                    stage: 'coder-model',
-                    label: 'Downloading Qwen2.5-Coder-14B-Instruct-GGUF',
-                    signal,
-                });
-            } else {
-                sendDownloadProgress({
-                    stage: 'coder-model',
-                    label: 'Qwen2.5-Coder-14B-Instruct-GGUF already present',
-                    percent: 100,
-                    inProgress: false,
-                });
-            }
-
-            if (!(await fileExists(paths.visionModel))) {
-                const visionCandidates = await resolveModelDownloadCandidates({
-                    repos: VISION_MODEL_REPOS,
-                    preferredPatterns: [/q4_k_m\.gguf$/i, /q4.*\.gguf$/i],
-                    signal,
-                });
-                await downloadModelWithFallback({
-                    candidates: visionCandidates,
-                    destinationPath: paths.visionModel,
-                    stage: 'vision-model',
-                    label: 'Downloading Qwen2.5-VL-7B-Instruct-GGUF',
-                    signal,
-                });
-            } else {
-                sendDownloadProgress({
-                    stage: 'vision-model',
-                    label: 'Qwen2.5-VL-7B-Instruct-GGUF already present',
-                    percent: 100,
-                    inProgress: false,
-                });
-            }
-
             sendDownloadProgress({
                 stage: 'complete',
                 label: 'Runtime assets ready',
@@ -741,5 +693,6 @@ export const createRuntimeBootstrapService = ({ app, getMainWindow }) => {
         prepareRuntimeDirectories,
         ensureRuntimeAssets,
         cancelRuntimeBootstrap,
+        installLlamaServerVersion,
     };
 };

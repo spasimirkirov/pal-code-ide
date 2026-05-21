@@ -1,9 +1,17 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
   color-scheme: dark;
+  --app-bg-1: #05070e;
+  --app-bg-2: #090f1e;
+  --panel-glass: rgba(9, 14, 27, 0.72);
+  --panel-edge: rgba(131, 195, 255, 0.2);
+  --neon-cyan: #62f0ff;
+  --neon-blue: #69a8ff;
 }
 
 * {
@@ -19,8 +27,46 @@ body,
 }
 
 body {
-  font-family: 'Sora', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  background: #020617;
+  font-family: 'Space Grotesk', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  background:
+    radial-gradient(1200px 800px at 10% -5%, rgba(91, 179, 255, 0.2), transparent 56%),
+    radial-gradient(1000px 700px at 95% 10%, rgba(98, 240, 255, 0.18), transparent 48%),
+    linear-gradient(160deg, var(--app-bg-1), var(--app-bg-2) 45%, #080d19);
+  color: #d7e6ff;
+}
+
+code,
+pre,
+textarea,
+input,
+select,
+button {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.futuristic-shell {
+  position: relative;
+}
+
+.futuristic-shell::before {
+  content: '';
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(112, 196, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(112, 196, 255, 0.08) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.9), transparent 80%);
+  opacity: 0.28;
+  z-index: 0;
+}
+
+.glass-chrome {
+  background: var(--panel-glass);
+  backdrop-filter: blur(12px);
+  border-color: var(--panel-edge);
+  box-shadow: inset 0 1px 0 rgba(200, 230, 255, 0.08);
 }
 
 ::-webkit-scrollbar {

@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, GitCommitHorizontal, LoaderCircle, RefreshCw } from 'lucide-react';
+import { CheckCircle2, GitCommitHorizontal, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw } from 'lucide-react';
 
 const runtime = window.palRuntime;
 
-function GitFileList({ title, files }) {
+function GitFileList({ title, files, kind, actionBusyPath, onOpenDiff, onStage, onUnstage, onRevert }) {
     return (
         <div className="rounded-xl border border-slate-700/70 bg-slate-900/70 p-2">
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-slate-400">{title}</h4>
@@ -12,8 +12,62 @@ function GitFileList({ title, files }) {
             ) : (
                 <ul className="space-y-1">
                     {files.map((file) => (
-                        <li key={`${title}-${file.path}`} className="truncate rounded-md bg-slate-800/80 px-2 py-1 text-xs text-slate-200">
-                            {file.path}
+                        <li key={`${title}-${file.path}`} className="flex items-center justify-between rounded-md bg-slate-800/80 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700/80">
+                            <button
+                                type="button"
+                                onClick={() => onOpenDiff?.(file.path)}
+                                className="min-w-0 flex-1 truncate text-left"
+                            >
+                                {file.path}
+                            </button>
+                            <span className="ml-2 flex shrink-0 items-center gap-1">
+                                {kind === 'unstaged' ? (
+                                    <>
+                                        <button
+                                            type="button"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                onStage?.(file.path);
+                                            }}
+                                            className="text-slate-400 opacity-70 transition-all hover:text-white hover:opacity-100"
+                                            title="Stage file"
+                                        >
+                                            {actionBusyPath === file.path ? (
+                                                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                                            ) : (
+                                                <Plus className="h-3.5 w-3.5" />
+                                            )}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                onRevert?.(file.path);
+                                            }}
+                                            className="text-slate-400 opacity-70 transition-all hover:text-white hover:opacity-100"
+                                            title="Revert changes"
+                                        >
+                                            <RotateCcw className="h-3.5 w-3.5" />
+                                        </button>
+                                    </>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            onUnstage?.(file.path);
+                                        }}
+                                        className="text-slate-400 opacity-70 transition-all hover:text-white hover:opacity-100"
+                                        title="Unstage file"
+                                    >
+                                        {actionBusyPath === file.path ? (
+                                            <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                                        ) : (
+                                            <Minus className="h-3.5 w-3.5" />
+                                        )}
+                                    </button>
+                                )}
+                            </span>
                         </li>
                     ))}
                 </ul>
@@ -22,7 +76,7 @@ function GitFileList({ title, files }) {
     );
 }
 
-function GitExplorerPanel() {
+function GitExplorerPanel({ onOpenDiff }) {
     const [status, setStatus] = useState({
         isRepo: false,
         branch: null,
@@ -32,6 +86,7 @@ function GitExplorerPanel() {
     const [message, setMessage] = useState('');
     const [loading, setLoading] = useState(false);
     const [aiLoading, setAiLoading] = useState(false);
+    const [actionBusyPath, setActionBusyPath] = useState('');
     const [error, setError] = useState('');
     const [info, setInfo] = useState('');
 
@@ -102,6 +157,45 @@ function GitExplorerPanel() {
         }
     };
 
+    const handleStageFile = async (filePath) => {
+        setActionBusyPath(filePath);
+        setError('');
+        try {
+            await runtime.gitStageFile({ filePath });
+            await refreshStatus();
+        } catch (nextError) {
+            setError(nextError?.message || 'Failed to stage file.');
+        } finally {
+            setActionBusyPath('');
+        }
+    };
+
+    const handleUnstageFile = async (filePath) => {
+        setActionBusyPath(filePath);
+        setError('');
+        try {
+            await runtime.gitUnstageFile({ filePath });
+            await refreshStatus();
+        } catch (nextError) {
+            setError(nextError?.message || 'Failed to unstage file.');
+        } finally {
+            setActionBusyPath('');
+        }
+    };
+
+    const handleRevertFile = async (filePath) => {
+        setActionBusyPath(filePath);
+        setError('');
+        try {
+            await runtime.gitRevertFile({ filePath });
+            await refreshStatus();
+        } catch (nextError) {
+            setError(nextError?.message || 'Failed to revert file.');
+        } finally {
+            setActionBusyPath('');
+        }
+    };
+
     if (!status.isRepo) {
         return (
             <section className="flex h-full items-center justify-center p-4 text-center text-xs text-slate-500">
@@ -159,8 +253,23 @@ function GitExplorerPanel() {
             {info && <p className="mb-2 text-xs text-emerald-300">{info}</p>}
 
             <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
-                <GitFileList title="Staged" files={status.staged} />
-                <GitFileList title="Unstaged" files={status.unstaged} />
+                <GitFileList
+                    title="Staged"
+                    files={status.staged}
+                    kind="staged"
+                    actionBusyPath={actionBusyPath}
+                    onOpenDiff={onOpenDiff}
+                    onUnstage={handleUnstageFile}
+                />
+                <GitFileList
+                    title="Unstaged"
+                    files={status.unstaged}
+                    kind="unstaged"
+                    actionBusyPath={actionBusyPath}
+                    onOpenDiff={onOpenDiff}
+                    onStage={handleStageFile}
+                    onRevert={handleRevertFile}
+                />
             </div>
         </section>
     );
