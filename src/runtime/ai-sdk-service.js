@@ -5,7 +5,6 @@ const PRetryModule = require('p-retry');
 const { LRUCache } = require('lru-cache');
 const { trace, SpanStatusCode } = require('@opentelemetry/api');
 const { WORKSPACE_TOOL_DEFINITIONS, validateAndNormalizeToolArgs, getApprovalTypeForActionType } = require('../utils/toolRegistry');
-const { ensureModelLoaded } = require('./lm-studio-service');
 
 const pRetry = PRetryModule.default || PRetryModule;
 const toolTracer = trace.getTracer('pal.ai.tools');
@@ -15,13 +14,12 @@ const createAiSdkService = () => {
 
     const createProvider = ({ settings }) => {
         const baseURL = `${settings.lmStudio.endpointUrl.replace(/\/+$/, '')}/v1`;
-        const rawModelId = settings.lmStudio.activeModel;
-        const modelId = rawModelId.split(/[\\/]/).pop() || rawModelId;
+        const modelId = settings.lmStudio.activeModel || '';
         return { client: createOpenAI({ baseURL, apiKey: 'noop' }), modelId };
     };
 
     const buildSdkTools = (deps) => {
-        const { traceId, executeAction, requestApproval, onPending, onToolExecution } = deps;
+        const { traceId, executeAction, requestApproval, onPending, onToolExecution, autoApprovalMode } = deps;
         const tools = {};
         const readPathCounts = new Map();
         const repeatedCallCache = new LRUCache({ max: 250, ttl: 10 * 60 * 1000 });
@@ -94,10 +92,14 @@ const createAiSdkService = () => {
                         return { ok: false, error: loopError };
                     }
 
-                    if (approvalType === 'terminal') {
+                    const mode = String(autoApprovalMode || 'all');
+                    const needsApproval = mode === 'manual'
+                        || (mode === 'safe' && (approvalType === 'edit' || approvalType === 'terminal' || approvalType === 'external-network'))
+                        || (mode === 'all' && approvalType === 'terminal');
+                    if (needsApproval) {
                         const approved = await requestApproval(actionId, traceId);
                         if (!approved) {
-                            return { ok: false, error: 'Command rejected by user.' };
+                            return { ok: false, error: `${action.type} rejected by user.` };
                         }
                     }
 
@@ -170,18 +172,17 @@ const createAiSdkService = () => {
     };
 
     const sendPrompt = async ({ traceId, systemPrompt, messages, settings, tools, emit, maxSteps = 6, toolChoice, maxTokens = 8192 }) => {
-        if (settings?.lmStudio?.activeModel) {
-            ensureModelLoaded(settings, settings.lmStudio.activeModel).catch((err) => {
-                logger.warn({ traceId, error: err.message }, 'Model auto-load failed, proceeding anyway');
-            });
-        }
         const { client, modelId } = createProvider({ settings });
         const model = client(modelId);
+
+        // Strip system role from messages array — pass it as `system:` param instead.
+        // Some GGUF models' Jinja templates choke on { role: 'system' } in messages.
+        const filteredMessages = Array.isArray(messages) ? messages.filter((m) => m.role !== 'system') : [];
 
         const streamOptions = {
             model,
             system: systemPrompt,
-            messages,
+            messages: filteredMessages,
             tools,
             maxSteps,
             maxTokens,

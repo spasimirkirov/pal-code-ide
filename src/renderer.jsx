@@ -11,6 +11,7 @@ import GitWorkspacePanel from './components/git/GitWorkspacePanel';
 import IdeTitleBar from './components/chrome/IdeTitleBar';
 import SidebarPanel from './components/sidebar/SidebarPanel';
 import AiAssistantPanel from './components/sidebar/AiAssistantPanel';
+import StatusBar from './components/StatusBar';
 import midnight from './config/muiTheme';
 import './index.css';
 
@@ -34,6 +35,7 @@ function App() {
     const [activeFilePath, setActiveFilePath] = useState('untitled.py');
     const [activeView, setActiveView] = useState('editor');
     const [chatVisible, setChatVisible] = useState(true);
+    const [terminalVisible, setTerminalVisible] = useState(true);
     const [isWindowMaximized, setIsWindowMaximized] = useState(true);
     const [paneDimensions, setPaneDimensions] = useState({ ...DEFAULT_PANE_DIMENSIONS });
     const [workspaceRoot, setWorkspaceRoot] = useState('');
@@ -41,6 +43,17 @@ function App() {
     const [modelPerf, setModelPerf] = useState({
         tokensPerSec: 0, contextUsed: 0, contextTotal: 32000,
     });
+    const [autoApprovalMode, setAutoApprovalMode] = useState(() => localStorage.getItem('pal-chat-auto-approval-mode') || 'all');
+    const [settingsRefreshKey, setSettingsRefreshKey] = useState(0);
+
+    const handleAutoApprovalModeChange = useCallback((mode) => {
+        setAutoApprovalMode(mode);
+        localStorage.setItem('pal-chat-auto-approval-mode', mode);
+    }, []);
+
+    const handleRefreshSettings = useCallback(() => {
+        setSettingsRefreshKey((k) => k + 1);
+    }, []);
 
     const [bootstrapState, setBootstrapState] = useState({
         visible: true, inProgress: true, label: 'Preparing PAL runtime...',
@@ -111,6 +124,7 @@ function App() {
         let unsubscribe = null;
         let unsubscribeHardware = null;
         let unsubscribeWindowState = null;
+        let unsubscribeShortcut = null;
 
         const runBootstrap = async () => {
             if (!runtime) return;
@@ -177,6 +191,15 @@ function App() {
             });
         }
 
+        if (runtime?.onAppShortcut) {
+            unsubscribeShortcut = runtime.onAppShortcut((payload) => {
+                if (!isMounted || !payload) return;
+                if (payload.id === 'toggle-terminal') {
+                    setTerminalVisible((current) => !current);
+                }
+            });
+        }
+
         if (runtime?.getAppearanceSettings) {
             void runtime.getAppearanceSettings().then((payload) => {
                 if (!isMounted || !payload?.paneDimensions) return;
@@ -193,6 +216,7 @@ function App() {
             if (unsubscribe) unsubscribe();
             if (unsubscribeHardware) unsubscribeHardware();
             if (unsubscribeWindowState) unsubscribeWindowState();
+            if (unsubscribeShortcut) unsubscribeShortcut();
             window.clearInterval(pollId);
         };
     }, []);
@@ -235,9 +259,6 @@ function App() {
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
     };
-
-    const formatContext = (value) => value >= 1000 ? `${(value / 1000).toFixed(1)}k` : `${value}`;
-    const vramPercent = hardware.vramTotal > 0 ? Math.max(0, Math.min(100, (hardware.vramUsed / hardware.vramTotal) * 100)) : 0;
 
     const handleModelMetricsUpdate = ({ tokensPerSec, contextUsed, contextTotal }) => {
         setModelPerf((current) => ({
@@ -409,6 +430,8 @@ function App() {
                                 onModelMetricsUpdate={handleModelMetricsUpdate}
                                 terminalHeightRatio={paneDimensions.terminalHeightRatio}
                                 onTerminalHeightRatioChange={(v) => updatePaneDimensions({ terminalHeightRatio: v })}
+                                terminalVisible={terminalVisible}
+                                onToggleTerminal={() => setTerminalVisible((current) => !current)}
                             />
                         )}
                     </section>
@@ -424,25 +447,22 @@ function App() {
                                     workspaceRoot={workspaceRoot}
                                     onApplyCode={handleApplyCode}
                                     onModelMetricsUpdate={handleModelMetricsUpdate}
+                                    autoApprovalMode={autoApprovalMode}
+                                    onAutoApprovalModeChange={handleAutoApprovalModeChange}
+                                    settingsRefreshKey={settingsRefreshKey}
                                 />
                             </section>
                         </>
                     )}
                 </main>
 
-                <footer className="glass-chrome relative z-10 flex h-6 items-center justify-end border-t px-3 text-[11px] text-slate-300">
-                    <div className="flex items-center gap-4">
-                        <div className="min-w-[190px]">
-                            <p className="mb-0.5 text-slate-400">VRAM: {(hardware.vramUsed / 1024).toFixed(1)} / {(hardware.vramTotal / 1024).toFixed(1)} GB</p>
-                            <div className="h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                                <div className="h-full rounded-full bg-gradient-to-r from-cyan-300/80 to-teal-300/80" style={{ width: `${vramPercent}%` }} />
-                            </div>
-                        </div>
-                        <p className="whitespace-nowrap text-slate-300">
-                            {modelPerf.tokensPerSec.toFixed(1)} t/s | Context: {formatContext(modelPerf.contextUsed)}/{formatContext(modelPerf.contextTotal)}
-                        </p>
-                    </div>
-                </footer>
+                <StatusBar
+                    hardware={hardware}
+                    modelPerf={modelPerf}
+                    autoApprovalMode={autoApprovalMode}
+                    onAutoApprovalModeChange={handleAutoApprovalModeChange}
+                    onRefreshSettings={handleRefreshSettings}
+                />
 
                 {bootstrapState.visible && (
                     <div className="absolute inset-0 z-50 grid place-items-center bg-slate-950/90 p-6 backdrop-blur-sm">

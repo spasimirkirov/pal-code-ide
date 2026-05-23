@@ -92,9 +92,5 @@ export const defaultAiSettings = {
         autoLint: true,
         mapTokens: 1024,
     },
-    opencode: {
-        model: '',
-        apiKey: '',
-        useApiKey: false,
-    },
+
 };

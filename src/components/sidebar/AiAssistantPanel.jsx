@@ -4,7 +4,7 @@ import {
     Alert, CircularProgress, Tooltip, Chip, Switch, FormControlLabel,
     Paper,
 } from '@mui/material';
-import { RefreshCw, Sparkles, Bot, CheckCircle2, XCircle, Globe, Server, Cpu, Cog } from 'lucide-react';
+import { RefreshCw, Sparkles, Bot, Server, Cpu, Cog } from 'lucide-react';
 
 const runtime = window.palRuntime;
 
@@ -13,7 +13,6 @@ const defaultSettings = {
     agentType: 'built-in',
     lmStudio: { endpointUrl: 'http://localhost:1234', port: '1234', activeModel: '' },
     aider: { autoCommits: false, autoLint: true, mapTokens: 1024 },
-    opencode: { model: '', apiKey: '' },
 };
 
 function AiAssistantPanel() {
@@ -24,8 +23,6 @@ function AiAssistantPanel() {
     const [lmStudioReachable, setLmStudioReachable] = useState(true);
     const [aiderStatus, setAiderStatus] = useState(null);
     const [aiderLoading, setAiderLoading] = useState(false);
-    const [opencodeStatus, setOpencodeStatus] = useState(null);
-    const [opencodeLoading, setOpencodeLoading] = useState(false);
 
     const hydrate = async () => {
         try {
@@ -69,19 +66,9 @@ function AiAssistantPanel() {
         finally { setAiderLoading(false); }
     };
 
-    const checkOpencode = async () => {
-        setOpencodeLoading(true);
-        try {
-            const result = await runtime?.opencodeCheck?.();
-            setOpencodeStatus(result || { available: false, error: 'No response' });
-        } catch { setOpencodeStatus({ available: false, error: 'Failed to check OpenCode' }); }
-        finally { setOpencodeLoading(false); }
-    };
-
     useEffect(() => {
         void refreshLmStudioModels();
         void checkAider();
-        void checkOpencode();
     }, []);
 
     return (
@@ -267,63 +254,7 @@ function AiAssistantPanel() {
                                     Version {aiderStatus.version}
                                 </Typography>
                             )}
-                        </Box>
-
-                        {/* OpenCode */}
-                        <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(105, 168, 255, 0.04)', border: '1px solid', borderColor: 'divider' }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(105, 168, 255, 0.1)' }}>
-                                    <Globe size={16} style={{ color: '#69a8ff' }} />
-                                </Box>
-                                <Box sx={{ flex: 1 }}>
-                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>OpenCode</Typography>
-                                        {opencodeStatus && (
-                                            <Chip
-                                                label={opencodeStatus.available ? 'Ready' : 'Unavailable'}
-                                                size="small"
-                                                sx={{
-                                                    height: 20, fontSize: '0.55rem', fontWeight: 600, borderRadius: 1,
-                                                    bgcolor: opencodeStatus.available ? 'rgba(74, 222, 128, 0.12)' : 'rgba(251, 113, 133, 0.12)',
-                                                    color: opencodeStatus.available ? 'success.light' : 'error.light',
-                                                }}
-                                            />
-                                        )}
-                                    </Box>
-                                    <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
-                                        Autonomous coding agent from opencode.ai
-                                    </Typography>
-                                </Box>
-                                <Tooltip title="Check OpenCode availability">
-                                    <IconButton size="small" onClick={() => void checkOpencode()} disabled={opencodeLoading} sx={{ width: 28, height: 28 }}>
-                                        {opencodeLoading ? <CircularProgress size={12} /> : <RefreshCw size={13} />}
-                                    </IconButton>
-                                </Tooltip>
-                            </Box>
-
-                            <FormControlLabel
-                                control={
-                                    <Switch
-                                        size="small"
-                                        checked={settings.agentType === 'opencode'}
-                                        onChange={(e) => void updateSettings({ agentType: e.target.checked ? 'opencode' : 'built-in' })}
-                                    />
-                                }
-                                label="Use OpenCode as agent backend"
-                                sx={{ '& .MuiTypography-root': { fontSize: '0.75rem' } }}
-                            />
-
-                            {opencodeStatus && !opencodeStatus.available && (
-                                <Alert severity="error" sx={{ mt: 1.5, py: 0.5, px: 1.5, fontSize: '0.6875rem', borderRadius: 1.5 }}>
-                                    {opencodeStatus.error || 'OpenCode CLI not found in PATH'}
-                                </Alert>
-                            )}
-                            {opencodeStatus?.available && (
-                                <Typography variant="caption" sx={{ color: 'success.light', fontSize: '0.65rem', display: 'block', mt: 0.5, ml: 5 }}>
-                                    Version {opencodeStatus.version}
-                                </Typography>
-                            )}
-                        </Box>
+                    </Box>
                     </Box>
                 </Paper>
             </Box>

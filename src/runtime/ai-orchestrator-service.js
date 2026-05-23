@@ -80,7 +80,7 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
 
         if (isBinaryExtension(absPath)) {
             const ext = path.extname(absPath).toLowerCase();
-            throw new Error(`Cannot read "${path.basename(absPath)}": binary files (.${ext.slice(1)}) are not supported. If this is an image, this model does not support image input — describe the image's purpose to the user instead.`);
+            throw new Error(`Cannot read "${path.basename(absPath)}": binary files (.${ext.slice(1)}) are not supported. Skip this file and inform the user.`);
         }
 
         if (isBinaryContent(absPath)) {
@@ -131,17 +131,43 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
         let content = fs.readFileSync(absPath, 'utf-8');
         const ops = Array.isArray(patches) ? [...patches] : [];
         if (!ops.length) throw new Error('No patch operations provided.');
-        ops.sort((a, b) => (b.lineStart || 0) - (a.lineStart || 0));
+
+        const normalizeWs = (str) => str.replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n');
+
         for (const op of ops) {
-            const lines = content.split('\n');
-            const start = Math.max(0, (op.lineStart || 1) - 1);
-            const end = Math.min(lines.length, op.lineEnd ? op.lineEnd : start + 1);
-            const newLines = String(op.text || '').split('\n');
-            lines.splice(start, end - start, ...newLines);
-            content = lines.join('\n');
+            const find = op.find || '';
+            const replace = op.replace || '';
+            if (!find) throw new Error('Each patch must have a `find` field.');
+
+            const normalizedContent = normalizeWs(content);
+            const normalizedFind = normalizeWs(find);
+
+            const exactIdx = content.indexOf(find);
+            if (exactIdx !== -1) {
+                content = content.slice(0, exactIdx) + replace + content.slice(exactIdx + find.length);
+                continue;
+            }
+
+            const normIdx = normalizedContent.indexOf(normalizedFind);
+            if (normIdx !== -1) {
+                content = content.slice(0, normIdx) + replace + content.slice(normIdx + normalizedFind.length);
+                continue;
+            }
+
+            const relaxedFind = normalizedFind.replace(/[ \t]+/g, ' ');
+            const relaxedContent = normalizedContent.replace(/[ \t]+/g, ' ');
+            const relaxedIdx = relaxedContent.indexOf(relaxedFind);
+            if (relaxedIdx !== -1) {
+                const beforeLen = content.slice(0, relaxedIdx).length;
+                content = content.slice(0, beforeLen) + replace + content.slice(beforeLen + normalizedFind.length);
+                continue;
+            }
+
+            throw new Error(`Search block not found in file "${relativePath}". The exact text to replace must match what is in the file.`);
         }
+
         fs.writeFileSync(absPath, content, 'utf-8');
-        return { path: absPath };
+        return { path: absPath, changes: ops.length };
     };
 
     // ── Path Validation ─────────────────────────────────────────────────
@@ -563,6 +589,7 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
     };
     const onPending = ({ traceId, action }) => {
         emit('ai:action-pending', { traceId, action });
+        emit('ai:native-action', { traceId, action });
     };
 
     // ── Main Entry ──────────────────────────────────────────────────────
@@ -603,6 +630,7 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
 
             // ── AI SDK path ──────────────────────────────────────────────
             await workspaceIndex.ensureFresh();
+            const approvalMode = settings?.autoApprovalMode || 'all';
             const tools = aiSdk.buildSdkTools({
                 traceId,
                 executeAction: ({ action: act, traceId: tid }) => executeAction({ action: act, traceId: tid }),
@@ -612,6 +640,7 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
                     logger.info({ traceId, ...event }, 'Tool execution event');
                     void taskMemory.recordToolExecution(event);
                 },
+                autoApprovalMode: approvalMode,
             });
             const estimateTokens = (str) => Math.ceil(String(str || '').length / 4);
             let historyMessages = Array.isArray(history) ? history.slice(-CHAT_HISTORY_WINDOW) : [];
@@ -624,7 +653,7 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
                     historyTokens -= estimateTokens(removed.content);
                 }
             }
-            const messages = [...historyMessages, { role: 'user', content: effectivePrompt }];
+            const messages = [{ role: 'system', content: systemPrompt }, ...historyMessages, { role: 'user', content: effectivePrompt }];
             const editIntent = /\b(implement|fix|add|create|update|modify|refactor|rename|remove|delete|move|change|wire|integrate|build|make)\b/i.test(prompt);
             const editToolNames = new Set([
                 'workspace_write_file',
@@ -743,13 +772,13 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
             const cleanedText = stripActionJsonBlocks(combinedText);
 
             if (fallbackActions.length > 0) {
-                const autoActions = fallbackActions.filter((a) => shouldAutoApproveAction(a, 'all'));
+                const autoActions = fallbackActions.filter((a) => shouldAutoApproveAction(a, approvalMode));
                 for (const action of autoActions) {
                     const execResult = await executeAction({ action, traceId });
                     emit('ai:action-result', { traceId, actionId: action.actionId, result: execResult });
                 }
 
-                const pendingActions = fallbackActions.filter((a) => !shouldAutoApproveAction(a, 'all'));
+                const pendingActions = fallbackActions.filter((a) => !shouldAutoApproveAction(a, approvalMode));
                 if (pendingActions.length > 0) {
                     for (const action of pendingActions) {
                         emit('ai:action-pending', { traceId, action });

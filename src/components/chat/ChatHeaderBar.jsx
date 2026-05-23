@@ -1,6 +1,6 @@
 import React from 'react';
-import { Box, IconButton, Tooltip, Chip, Menu, MenuItem, Typography } from '@mui/material';
-import { Plus, ChevronDown } from 'lucide-react';
+import { Box, IconButton, Tooltip, Typography } from '@mui/material';
+import { Plus } from 'lucide-react';
 
 function ChatHeaderBar({ onNewSession, lmStudioModel }) {
     return (
@@ -32,15 +32,6 @@ function ChatHeaderBar({ onNewSession, lmStudioModel }) {
                 <Typography variant="caption" sx={{ fontSize: '0.6rem', lineHeight: 1, color: 'text.disabled' }}>
                     LM Studio{lmStudioModel ? ` · ${lmStudioModel}` : ''}
                 </Typography>
-
-                <Tooltip title="All actions auto-approved" arrow>
-                    <Box
-                        sx={{
-                            width: 6, height: 6, borderRadius: '50%',
-                            bgcolor: 'success.main', opacity: 0.6, ml: 0.25,
-                        }}
-                    />
-                </Tooltip>
             </Box>
         </Box>
     );

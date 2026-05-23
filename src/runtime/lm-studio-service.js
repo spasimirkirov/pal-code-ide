@@ -7,7 +7,7 @@ const getEndpointUrl = (settings) => {
 };
 
 const normalizeModelId = (rawId) => {
-    return String(rawId || '').split(/[\\/]/).pop() || rawId || '';
+    return String(rawId || '').trim() || '';
 };
 
 const fetchJson = async (url, options = {}) => {
@@ -57,33 +57,50 @@ const unloadModel = async (settings, instanceId) => {
     });
 };
 
+let loadLock = null;
+
 const ensureModelLoaded = async (settings, modelId, options = {}) => {
+    // Serialize concurrent loads: wait for any in-progress load to finish first
+    if (loadLock) {
+        try { await loadLock; } catch { /* ignore previous error */ }
+    }
+
     const modelKey = normalizeModelId(modelId);
     if (!modelKey) throw new Error('No model ID specified for LM Studio auto-load');
 
     const cached = loadedModelCache.get('lastLoaded');
     if (cached === modelKey) return { loaded: true, modelKey, fromCache: true };
 
-    const loaded = await getLoadedModels(settings);
-    const alreadyLoaded = loaded.find((m) => m.key === modelKey);
-    if (alreadyLoaded) {
-        loadedModelCache.set('lastLoaded', modelKey);
-        return { loaded: true, modelKey, fromCache: false, alreadyLoaded: true };
-    }
-
-    if (loaded.length > 0) {
-        for (const m of loaded) {
-            for (const instance of m.instances) {
-                try {
-                    await unloadModel(settings, instance);
-                } catch { }
-            }
+    loadLock = (async () => {
+        const loaded = await getLoadedModels(settings);
+        const alreadyLoaded = loaded.find((m) => m.key === modelKey);
+        if (alreadyLoaded) {
+            loadedModelCache.set('lastLoaded', modelKey);
+            return { loaded: true, modelKey, fromCache: false, alreadyLoaded: true };
         }
-    }
 
-    const result = await loadModel(settings, modelKey, options);
-    loadedModelCache.set('lastLoaded', modelKey);
-    return { loaded: true, modelKey, loadTime: result.load_time_seconds };
+        if (loaded.length > 0) {
+            for (const m of loaded) {
+                for (const instance of m.instances) {
+                    try {
+                        await unloadModel(settings, instance);
+                    } catch { }
+                }
+            }
+            // Brief pause so LM Studio can release VRAM before loading the new model
+            await new Promise((r) => setTimeout(r, 500));
+        }
+
+        const result = await loadModel(settings, modelKey, options);
+        loadedModelCache.set('lastLoaded', modelKey);
+        return { loaded: true, modelKey, loadTime: result.load_time_seconds };
+    })();
+
+    try {
+        return await loadLock;
+    } finally {
+        loadLock = null;
+    }
 };
 
 module.exports = { getLoadedModels, isModelLoaded, loadModel, unloadModel, ensureModelLoaded };

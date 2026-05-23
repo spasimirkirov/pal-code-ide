@@ -14,7 +14,7 @@ const DEFAULT_MESSAGES = [
 const updateMessageById = (messages, id, updater) =>
     messages.map((msg) => (msg.id === id ? (typeof updater === 'function' ? updater(msg) : updater) : msg));
 
-function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
+function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoApprovalMode, onAutoApprovalModeChange, settingsRefreshKey }) {
     const [messages, setMessages] = useState(DEFAULT_MESSAGES);
     const [prompt, setPrompt] = useState('');
     const [isSending, setIsSending] = useState(false);
@@ -78,7 +78,7 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
         };
         void loadSettings();
         return () => { mounted = false; };
-    }, []);
+    }, [settingsRefreshKey]);
 
     useEffect(() => { autoScroll(); }, [messages]);
 
@@ -234,7 +234,7 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
             traceId: assistantId,
             prompt: trimmed,
             history,
-            settings: freshSettings || aiSettings,
+            settings: { ...(freshSettings || aiSettings), autoApprovalMode },
             workspaceRoot,
         });
     };
@@ -312,7 +312,7 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate }) {
                         message={m}
                         onApplyCode={onApplyCode}
                         workspaceActionState={workspaceActionState}
-                        autoApprovalMode="all"
+                        autoApprovalMode={autoApprovalMode}
                         appliedActionIds={appliedActionIds}
                         onApproveWorkspaceAction={approveWorkspaceAction}
                         onDenyWorkspaceAction={denyWorkspaceAction}

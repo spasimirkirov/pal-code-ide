@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process';
 import { killProcessTree } from '../shared/process-utils';
-import { createMcpRequestHandler } from './mcp-request-handler';
 
 const decodeHtml = (input) =>
     input
@@ -14,10 +13,6 @@ const decodeHtml = (input) =>
         .trim();
 
 export const createMcpToolsService = ({ getWorkspaceRoot }) => {
-    const createRequestHandler = (options = {}) =>
-        createMcpRequestHandler({
-            ...options,
-        });
 
     const executeTerminalTool = async ({ command, shell = 'powershell', timeoutMs = 120000 }) => {
         if (!command || typeof command !== 'string') {
@@ -189,7 +184,6 @@ export const createMcpToolsService = ({ getWorkspaceRoot }) => {
     };
 
     return {
-        createRequestHandler,
         executeTerminalTool,
         duckduckgoSearch,
         fetchWebpage,

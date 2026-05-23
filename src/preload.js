@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('palRuntime', {
     checkLocalModels: () => ipcRenderer.invoke('check-local-models'),
 
     lmStudioGetModels: (payload) => ipcRenderer.invoke('lmstudio:get-models', payload),
+    lmStudioLoadModel: (payload) => ipcRenderer.invoke('lmstudio:load-model', payload),
     getAppearanceSettings: () => ipcRenderer.invoke('settings:getAppearance'),
     setAppearanceSettings: (payload) => ipcRenderer.invoke('settings:setAppearance', payload),
     listProjectTree: () => ipcRenderer.invoke('project:listTree'),
@@ -110,9 +111,6 @@ contextBridge.exposeInMainWorld('palRuntime', {
     },
 
     aiderCheck: () => ipcRenderer.invoke('aider:check'),
-    opencodeCheck: () => ipcRenderer.invoke('opencode:check'),
-    opencodeStartServer: (payload) => ipcRenderer.invoke('opencode:start-server', payload),
-    opencodeStopServer: () => ipcRenderer.invoke('opencode:stop-server'),
     terminalExecute: (payload) => ipcRenderer.invoke('mcp:terminalExecute', payload),
     duckduckgoSearch: (payload) => ipcRenderer.invoke('mcp:duckduckgoSearch', payload),
 });

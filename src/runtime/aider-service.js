@@ -6,10 +6,55 @@ const ANSI_RE = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZ
 const TOKENS_LINE_RE = /^Tokens:\s+\d+\s+sent,\s+\d+\s+received\.?$/;
 const HEADER_END_RE = /^\s*-{3,}\s*$/;
 const AIDER_PROMPT_RE = /^>\s*$/;
+const SEARCH_REPLACE_BLOCK_RE = /<<<<<<< SEARCH\n([\s\S]*?)=======\n([\s\S]*?)>>>>>>> REPLACE/g;
 
 const stripAnsi = (text) => text.replace(ANSI_RE, '');
 
+const buildWorkspaceContext = (root) => {
+    try {
+        const files = [];
+        const walk = (dir, depth) => {
+            if (depth > 3) return;
+            let entries;
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+            for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                const relPath = path.relative(root, fullPath);
+                if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+                if (entry.isDirectory()) {
+                    walk(fullPath, depth + 1);
+                } else {
+                    files.push(relPath);
+                }
+            }
+        };
+        walk(root, 0);
+        return files.slice(0, 100).join('\n');
+    } catch { return ''; }
+};
+
+const extractDiffActions = (text) => {
+    const actions = [];
+    let match;
+    while ((match = SEARCH_REPLACE_BLOCK_RE.exec(text)) !== null) {
+        let path = 'unknown';
+        const before = text.slice(0, match.index);
+        const pathMatch = before.match(/(?:^|\n)(\S+)(?:\n|$)(?=[\s\S]*<<<<<<< SEARCH)/);
+        if (pathMatch) path = pathMatch[1].trim();
+        actions.push({
+            type: 'patch-search-replace',
+            path,
+            summary: `AI suggested edit in ${path}`,
+            patches: [{ find: match[1].trimEnd(), replace: match[2].trimEnd() }],
+        });
+    }
+    return actions;
+};
+
 export const createAiderService = ({ getWorkspaceRoot, getMainWindow }) => {
+    const logger = console;
+    const activeProcesses = new Map();
+
     const emit = (channel, payload) => {
         const win = typeof getMainWindow === 'function' ? getMainWindow() : null;
         if (win && !win.isDestroyed()) {
@@ -38,99 +83,132 @@ export const createAiderService = ({ getWorkspaceRoot, getMainWindow }) => {
         });
     };
 
-    const buildArgs = (modelName, apiBase) => {
+    const buildArgs = ({ modelName, apiBase, settings, root }) => {
+        const aider = settings?.aider || {};
+        const isGitRepo = fs.existsSync(path.join(root, '.git'));
         const args = [
-            '--no-auto-commits',
             '--no-suggest-shell-commands',
             '--no-pretty',
-            '--yes-always',
             '--no-show-model-warnings',
-            '--no-git',
             '--model', `openai/${modelName}`,
             '--openai-api-base', apiBase,
         ];
-
+        if (!aider.autoCommits) args.push('--no-auto-commits');
+        if (!isGitRepo) args.push('--no-git');
+        if (aider.autoLint) args.push('--lint');
+        if (aider.mapTokens) args.push('--map-tokens', String(aider.mapTokens));
         return args;
     };
 
-    const sendMessage = async ({ traceId, prompt, settings, workspaceRoot }) => {
-        const modelName = settings?.lmStudio?.activeModel;
+    const abortSession = (traceId) => {
+        const proc = activeProcesses.get(traceId);
+        if (proc) {
+            try { proc.kill('SIGTERM'); } catch { /* */ }
+            setTimeout(() => {
+                try { proc.kill('SIGKILL'); } catch { /* */ }
+            }, 2000);
+            activeProcesses.delete(traceId);
+        }
+    };
 
+    const sendMessage = async ({ traceId, prompt, history, settings, workspaceRoot }) => {
+        const modelName = settings?.lmStudio?.activeModel;
         if (!modelName) {
             emit('ai:error', { traceId, error: 'No model configured for Aider.', recoverable: false });
             return;
         }
 
         const apiBase = (settings?.lmStudio?.endpointUrl || 'http://localhost:1234') + '/v1';
-
         const root = workspaceRoot || (typeof getWorkspaceRoot === 'function' ? getWorkspaceRoot() : null) || process.cwd();
 
-        return new Promise((resolve) => {
-            const env = { ...process.env };
-            env.OPENAI_API_KEY = env.OPENAI_API_KEY || 'not-needed';
-            env.AIDER_OPENAI_API_BASE = apiBase;
+        const wsContext = buildWorkspaceContext(root);
+        const historyText = Array.isArray(history)
+            ? history.map((m) => `${m.role}: ${m.content}`).join('\n\n')
+            : '';
 
-            const args = buildArgs(modelName, apiBase);
-            const tmpFile = path.join(root, `.aider-msg-${traceId || Date.now()}.md`);
-            fs.writeFileSync(tmpFile, prompt, 'utf-8');
-            args.push('--message-file', tmpFile);
+        const fullPrompt = [
+            wsContext ? `Workspace files:\n${wsContext}\n` : '',
+            historyText ? `Previous conversation:\n${historyText}` : '',
+            `User: ${prompt}`,
+        ].filter(Boolean).join('\n\n');
 
-            const child = spawn('aider', args, {
-                cwd: root,
-                shell: true,
-                stdio: ['pipe', 'pipe', 'pipe'],
-                env,
-            });
+        const env = { ...process.env };
+        env.OPENAI_API_KEY = env.OPENAI_API_KEY || 'not-needed';
+        env.AIDER_OPENAI_API_BASE = apiBase;
 
-            child.on('close', () => {
-                try { fs.unlinkSync(tmpFile); } catch { /* */ }
-            });
+        const args = buildArgs({ modelName, apiBase, settings, root });
+        const tmpFile = path.join(root, `.aider-msg-${traceId || Date.now()}.md`);
+        fs.writeFileSync(tmpFile, fullPrompt, 'utf-8');
+        args.push('--message-file', tmpFile);
 
-            let stdout = '';
-            let stderr = '';
-            let headerDone = false;
+        const child = spawn('aider', args, {
+            cwd: root,
+            shell: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env,
+        });
 
-            child.stdout.on('data', (data) => {
-                const text = String(data);
-                stdout += text;
+        activeProcesses.set(traceId, child);
 
-                const clean = stripAnsi(text);
-                const lines = clean.split('\n');
+        let stdout = '';
+        let stderr = '';
+        let headerDone = false;
 
-                for (const line of lines) {
-                    if (!headerDone) {
-                        if (HEADER_END_RE.test(line.trim())) {
-                            headerDone = true;
-                        }
-                        continue;
+        child.stdout.on('data', (data) => {
+            const text = String(data);
+            stdout += text;
+            const clean = stripAnsi(text);
+            const lines = clean.split('\n');
+            for (const line of lines) {
+                if (!headerDone) {
+                    if (HEADER_END_RE.test(line.trim())) {
+                        headerDone = true;
                     }
-                    const trimmed = line.trim();
-                    if (!trimmed || TOKENS_LINE_RE.test(trimmed) || AIDER_PROMPT_RE.test(trimmed)) {
-                        continue;
-                    }
-                    emit('ai:stream-chunk', { traceId, text: trimmed + '\n' });
+                    continue;
                 }
-            });
+                const trimmed = line.trim();
+                if (!trimmed || TOKENS_LINE_RE.test(trimmed) || AIDER_PROMPT_RE.test(trimmed)) {
+                    continue;
+                }
+                emit('ai:stream-chunk', { traceId, text: trimmed + '\n' });
+            }
+        });
 
-            child.stderr.on('data', (data) => {
-                stderr += String(data);
-            });
+        child.stderr.on('data', (data) => {
+            stderr += String(data);
+        });
 
+        return new Promise((resolve) => {
             child.on('close', (code) => {
+                activeProcesses.delete(traceId);
+                try { fs.unlinkSync(tmpFile); } catch { /* */ }
+
                 const cleanStdout = stripAnsi(stdout);
                 const body = extractResponseBody(cleanStdout);
+                const diffActions = extractDiffActions(cleanStdout);
 
                 if (code === 0 && body) {
-                    emit('ai:done', { traceId, text: body, actions: [], nativeActions: [] });
-                    resolve({ text: body, actions: [], nativeActions: [] });
+                    if (diffActions.length > 0) {
+                        emit('ai:done', { traceId, text: body, actions: diffActions, nativeActions: diffActions });
+                        resolve({ text: body, actions: diffActions, nativeActions: diffActions });
+                    } else {
+                        emit('ai:done', { traceId, text: body, actions: [], nativeActions: [] });
+                        resolve({ text: body, actions: [], nativeActions: [] });
+                    }
                 } else {
                     const error = stderr.trim() || 'Aider exited with code ' + code;
-                    emit('ai:error', { traceId, error, recoverable: false });
-                    resolve({ text: '', error });
+                    if (!body) {
+                        emit('ai:error', { traceId, error, recoverable: false });
+                        resolve({ text: '', error });
+                    } else {
+                        emit('ai:done', { traceId, text: body, actions: diffActions, nativeActions: diffActions });
+                        resolve({ text: body, actions: diffActions, nativeActions: diffActions });
+                    }
                 }
             });
 
             child.on('error', (err) => {
+                activeProcesses.delete(traceId);
                 const error = String(err?.message || 'Failed to start Aider.');
                 emit('ai:error', { traceId, error, recoverable: true });
                 resolve({ text: '', error });
@@ -142,7 +220,6 @@ export const createAiderService = ({ getWorkspaceRoot, getMainWindow }) => {
         const lines = text.split('\n');
         let inBody = false;
         const body = [];
-
         for (const line of lines) {
             if (!inBody) {
                 if (HEADER_END_RE.test(line.trim())) {
@@ -156,9 +233,10 @@ export const createAiderService = ({ getWorkspaceRoot, getMainWindow }) => {
             }
             body.push(line);
         }
-
         return body.join('\n').trim();
     };
 
-    return { checkAvailable, sendMessage };
+    const getActiveSessions = () => Array.from(activeProcesses.keys());
+
+    return { checkAvailable, sendMessage, abortSession, getActiveSessions };
 };

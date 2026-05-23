@@ -1,17 +1,46 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
     Box, Typography, Button, Chip, Accordion, AccordionSummary, AccordionDetails,
-    Paper, Stack, Divider, IconButton,
+    Stack, IconButton,
 } from '@mui/material';
 import {
-    Bot, ChevronRight, FileText, LoaderCircle, PencilLine, Search, Sparkles, User, Check, X,
+    Bot, ChevronRight, FileText, LoaderCircle, PencilLine, Search, Sparkles, User, Check, X, FileDiff,
 } from 'lucide-react';
 import { extractCodeBlocks, parseWorkspaceActionBlocks, shouldAutoApproveAction, stripActionJsonBlocks } from '../../utils/aiHelpers';
+import DiffViewer from '../DiffViewer';
 
 function ChatMessageItem({
     message, onApplyCode, workspaceActionState, autoApprovalMode,
     appliedActionIds, onApproveWorkspaceAction, onDenyWorkspaceAction,
 }) {
+    const [diffData, setDiffData] = useState({});
+    const [diffLoading, setDiffLoading] = useState({});
+    const [diffVisible, setDiffVisible] = useState({});
+
+    const loadDiff = async (actionKey, filePath) => {
+        if (diffData[actionKey] || diffLoading[actionKey]) return;
+        setDiffLoading((prev) => ({ ...prev, [actionKey]: true }));
+        try {
+            const result = await window.projectRuntime?.patchCreateDiff?.({ filePath });
+            if (result?.ok && result.diff) {
+                setDiffData((prev) => ({ ...prev, [actionKey]: result.diff }));
+            } else {
+                setDiffData((prev) => ({ ...prev, [actionKey]: '_error_' }));
+            }
+        } catch {
+            setDiffData((prev) => ({ ...prev, [actionKey]: '_error_' }));
+        } finally {
+            setDiffLoading((prev) => ({ ...prev, [actionKey]: false }));
+        }
+    };
+
+    const toggleDiff = (actionKey, filePath) => {
+        if (!diffData[actionKey] && !diffLoading[actionKey]) {
+            loadDiff(actionKey, filePath);
+        }
+        setDiffVisible((prev) => ({ ...prev, [actionKey]: !prev[actionKey] }));
+    };
+
     const isUser = message.role === 'user';
     const visibleText = isUser ? String(message.text || '') : stripActionJsonBlocks(String(message.text || ''));
     const codeBlocks = extractCodeBlocks(visibleText);
@@ -111,6 +140,30 @@ function ChatMessageItem({
                 </Box>
             )}
 
+            {/* Thinking block */}
+            {!isUser && message.thinking && (
+                <Box
+                    sx={{
+                        mb: 1, p: 1, borderRadius: '6px',
+                        bgcolor: 'rgba(168,85,247,0.04)', border: '1px solid', borderColor: 'rgba(168,85,247,0.12)',
+                    }}
+                >
+                    <Typography variant="caption" sx={{ fontSize: '0.55rem', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(168,85,247,0.6)', mb: 0.5, display: 'block' }}>
+                        Thinking
+                    </Typography>
+                    <Typography
+                        variant="caption"
+                        sx={{
+                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                            fontFamily: 'monospace', fontSize: '0.7rem', lineHeight: 1.6,
+                            color: 'rgba(168,85,247,0.55)', fontStyle: 'italic',
+                        }}
+                    >
+                        {message.thinking}
+                    </Typography>
+                </Box>
+            )}
+
             {/* Message text */}
             <Typography
                 component="div"
@@ -160,12 +213,9 @@ function ChatMessageItem({
                 </Stack>
             )}
 
-            {/* Workspace actions */}
+            {/* Workspace actions — compact highlights like OpenCode */}
             {!isUser && workspaceActions.length > 0 && (
-                <Box sx={{ mt: 1.5, p: 1, borderRadius: '8px', bgcolor: 'rgba(2,6,16,0.5)', border: '1px solid', borderColor: 'divider' }}>
-                    <Typography variant="caption" sx={{ fontWeight: 600, fontSize: '0.6rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'primary.light', mb: 0.75, display: 'block' }}>
-                        Actions
-                    </Typography>
+                <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: '2px' }}>
                     {workspaceActions.map((wa, i) => {
                         const actionKey = wa.actionId || `${message.id}:${i}`;
                         const actionState = workspaceActionState[actionKey] || null;
@@ -176,69 +226,135 @@ function ChatMessageItem({
                         const needsApproval = !isApplied && !isDenied && actionState?.status !== 'running'
                             && (!shouldAutoApproveAction(wa, autoApprovalMode) || isTerminal);
 
+                        let statusColor = 'rgba(148,163,184,0.25)';
+                        let statusText = '';
+                        if (isApplied) { statusColor = 'rgba(52,211,153,0.6)'; statusText = 'done'; }
+                        if (isDenied) { statusColor = 'rgba(251,113,133,0.6)'; statusText = 'denied'; }
+                        if (actionState?.status === 'running') { statusColor = 'rgba(43,209,255,0.6)'; statusText = '...'; }
+
+                        const typeColors = {
+                            'read-file': '#2bd1ff',
+                            'search-text': '#2bd1ff',
+                            'list-folder': '#2bd1ff',
+                            'write-file': '#4ade80',
+                            'patch-file': '#4ade80',
+                            'delete-file': '#fb7185',
+                            'create-folder': '#fbbf24',
+                            'patch-search-replace': '#4ade80',
+                            'patch-unified-diff': '#4ade80',
+                            'patch-rollback': '#fb7185',
+                            'terminal-command': '#fbbf24',
+                            'web-search': '#a78bfa',
+                        };
+                        const typeColor = typeColors[wa.type] || 'rgba(148,163,184,0.4)';
+
                         return (
-                            <Paper
+                            <Box
                                 key={actionKey}
-                                variant="outlined"
                                 sx={{
-                                    p: 0.75, mb: 0.5, borderRadius: '6px',
-                                    borderColor: isApplied ? 'rgba(52,211,153,0.35)' : 'rgba(148,163,184,0.12)',
-                                    bgcolor: isApplied ? 'rgba(52,211,153,0.04)' : 'rgba(2,6,16,0.3)',
+                                    display: 'flex', alignItems: 'center', gap: 0.5,
+                                    px: 1, py: 0.5, borderRadius: '4px',
+                                    fontSize: '0.7rem', lineHeight: 1.3,
+                                    bgcolor: isApplied ? 'rgba(52,211,153,0.06)' : 'rgba(2,6,16,0.35)',
+                                    borderLeft: `2px solid ${statusColor}`,
+                                    fontFamily: 'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace',
                                 }}
                             >
-                                <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-                                    <Box sx={{ minWidth: 0 }}>
-                                        <Typography variant="body2" sx={{ fontSize: '0.75rem', fontWeight: 500 }}>
-                                            {wa.type === 'create-folder' ? 'Create folder' : wa.type} <Typography component="span" variant="body2" sx={{ fontSize: '0.75rem', color: 'text.disabled' }}>&rarr; {wa.path}</Typography>
-                                        </Typography>
-                                        {wa.summary && (
-                                            <Typography variant="caption" sx={{ fontSize: '0.65rem', color: 'text.disabled', display: 'block', mt: 0.125 }}>
-                                                {wa.summary}
-                                            </Typography>
-                                        )}
-                                        {(isTerminal && wa.command) || (isWebSearch && wa.query) ? (
-                                            <Box sx={{ mt: 0.5, p: 0.75, borderRadius: '4px', bgcolor: 'rgba(0,0,0,0.3)', fontFamily: 'monospace', fontSize: '0.65rem', color: isTerminal ? '#fbbf24' : '#2bd1ff', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                                                {isTerminal ? wa.command : wa.query}
-                                            </Box>
-                                        ) : null}
-                                    </Box>
-                                    <Box sx={{ flexShrink: 0 }}>
-                                        {needsApproval ? (
-                                            <Stack direction="row" spacing={0.25}>
-                                                <IconButton
-                                                    size="small"
-                                                    onClick={() => onApproveWorkspaceAction?.(wa)}
-                                                    sx={{ width: 22, height: 22, borderRadius: '4px', color: 'success.main', '&:hover': { bgcolor: 'rgba(52,211,153,0.12)' } }}
-                                                >
-                                                    <Check size={12} />
-                                                </IconButton>
-                                                <IconButton
-                                                    size="small"
-                                                    onClick={() => onDenyWorkspaceAction?.(wa)}
-                                                    sx={{ width: 22, height: 22, borderRadius: '4px', color: 'error.main', '&:hover': { bgcolor: 'rgba(251,113,133,0.12)' } }}
-                                                >
-                                                    <X size={12} />
-                                                </IconButton>
-                                            </Stack>
-                                        ) : (
-                                            <Chip
-                                                label={actionState?.status === 'running' ? 'Applying...' : isDenied ? 'Denied' : isApplied ? 'Done' : 'Auto'}
-                                                size="small"
-                                                sx={{ height: 18, fontSize: '0.55rem', '& .MuiChip-label': { px: 0.5 } }}
-                                                color={isApplied ? 'success' : isDenied ? 'error' : 'default'}
-                                                variant="outlined"
-                                            />
-                                        )}
-                                    </Box>
-                                </Stack>
-                                {actionState?.status === 'error' && (
-                                    <Typography variant="caption" sx={{ color: 'error.main', fontSize: '0.65rem', mt: 0.5, display: 'block' }}>
-                                        {actionState.detail}
+                                {/* Type badge */}
+                                <Box
+                                    component="span"
+                                    sx={{
+                                        display: 'inline-flex', px: 0.5, py: '1px', borderRadius: '3px',
+                                        fontSize: '0.6rem', fontWeight: 600, lineHeight: 1.4,
+                                        color: '#0f1319', bgcolor: typeColor, whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    {(wa.type || '').replace(/-/g, ' ')}
+                                </Box>
+
+                                {/* Path */}
+                                {wa.path && (
+                                    <Typography
+                                        variant="caption"
+                                        sx={{
+                                            fontSize: '0.65rem', color: 'text.secondary', ml: 0.25,
+                                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                            flex: 1, minWidth: 0,
+                                        }}
+                                    >
+                                        {wa.path}
                                     </Typography>
                                 )}
-                            </Paper>
+
+                                {/* Command / query inline */}
+                                {(isTerminal && wa.command) || (isWebSearch && wa.query) ? (
+                                    <Typography
+                                        variant="caption"
+                                        sx={{
+                                            fontSize: '0.6rem', color: isTerminal ? '#fbbf24' : '#a78bfa',
+                                            ml: 0.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                            flex: 1, minWidth: 0,
+                                        }}
+                                    >
+                                        {isTerminal ? `$ ${wa.command}` : wa.query}
+                                    </Typography>
+                                ) : null}
+
+                                {/* Summary */}
+                                {wa.summary && !wa.path && !isTerminal && !isWebSearch && (
+                                    <Typography
+                                        variant="caption"
+                                        sx={{
+                                            fontSize: '0.6rem', color: 'text.disabled', ml: 0.25,
+                                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                            flex: 1, minWidth: 0,
+                                        }}
+                                    >
+                                        {wa.summary}
+                                    </Typography>
+                                )}
+
+                                {/* Status / actions */}
+                                <Box sx={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 0.25, ml: 'auto' }}>
+                                    {needsApproval ? (
+                                        <>
+                                            <IconButton
+                                                size="small"
+                                                onClick={() => onApproveWorkspaceAction?.(wa)}
+                                                sx={{ width: 18, height: 18, borderRadius: '3px', color: 'success.main', '&:hover': { bgcolor: 'rgba(52,211,153,0.15)' } }}
+                                            >
+                                                <Check size={10} />
+                                            </IconButton>
+                                            <IconButton
+                                                size="small"
+                                                onClick={() => onDenyWorkspaceAction?.(wa)}
+                                                sx={{ width: 18, height: 18, borderRadius: '3px', color: 'error.main', '&:hover': { bgcolor: 'rgba(251,113,133,0.15)' } }}
+                                            >
+                                                <X size={10} />
+                                            </IconButton>
+                                        </>
+                                    ) : (
+                                        <Typography variant="caption" sx={{ fontSize: '0.55rem', color: statusColor, whiteSpace: 'nowrap' }}>
+                                            {actionState?.status === 'running' ? 'running...' : statusText}
+                                        </Typography>
+                                    )}
+                                    {isApplied && wa.type !== 'terminal-command' && wa.type !== 'web-search' && (
+                                        <Box
+                                            component="span"
+                                            onClick={() => toggleDiff(actionKey, wa.path)}
+                                            sx={{ fontSize: '0.55rem', color: 'text.disabled', cursor: 'pointer', '&:hover': { color: 'primary.light' }, ml: 0.25 }}
+                                        >
+                                            <FileDiff size={10} style={{ verticalAlign: 'middle' }} />
+                                        </Box>
+                                    )}
+                                    {diffVisible[actionKey] && diffData[actionKey] && diffData[actionKey] !== '_error_' && (
+                                        <DiffViewer diffText={diffData[actionKey]} />
+                                    )}
+                                </Box>
+                            </Box>
                         );
                     })}
+
                 </Box>
             )}
         </Box>

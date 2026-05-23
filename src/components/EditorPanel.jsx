@@ -117,6 +117,7 @@ function EditorPanel({
     terminalHeightRatio = 0.27,
     onTerminalHeightRatioChange,
     terminalVisible = true,
+    onToggleTerminal,
 }) {
     const terminalWrapRef = useRef(null);
     const terminalContainerMapRef = useRef({});

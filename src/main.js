@@ -19,10 +19,10 @@ import { createCodeSearchService } from './runtime/code-search-service';
 import { createPatchService } from './runtime/patch-service';
 import { createValidationService } from './runtime/validation-service';
 import { createAiderService } from './runtime/aider-service';
-import { createOpencodeService } from './runtime/opencode-service';
 import { createDatabaseService } from './runtime/database/database-service';
 import { createLlamaService } from './llama-server/llama-service';
 import { createMcpToolsService } from './mcp-tools/mcp-tools-service';
+import * as lmStudioService from './runtime/lm-studio-service';
 import {
   WORKSPACE_IGNORED_NAMES,
   WORKSPACE_MAX_TREE_NODES,
@@ -297,9 +297,7 @@ const normalizeDbProfile = (payload = {}) => ({
     const roleMappings = input?.roleMappings || {};
     const lmStudio = input?.lmStudio || {};
     const aider = input?.aider || {};
-    const opencode = input?.opencode || {};
-
-    const allowedAgentTypes = ['built-in', 'aider', 'opencode'];
+    const allowedAgentTypes = ['built-in', 'aider'];
 
     const rawAgentType = String(input?.agentType || 'built-in').toLowerCase();
 
@@ -321,11 +319,6 @@ const normalizeDbProfile = (payload = {}) => ({
         autoLint: Boolean(aider.autoLint),
         mapTokens: Math.max(256, Math.min(8192, Number(aider.mapTokens) || 1024)),
       },
-      opencode: {
-        model: String(opencode.model || ''),
-        apiKey: String(opencode.apiKey || ''),
-        useApiKey: opencode.useApiKey === true,
-      },
     };
   };
 
@@ -346,10 +339,6 @@ const setAiAssistantSettings = (payload = {}) => {
     aider: {
       ...getAiAssistantSettings().aider,
       ...(payload?.aider || {}),
-    },
-    opencode: {
-      ...getAiAssistantSettings().opencode,
-      ...(payload?.opencode || {}),
     },
   });
 
@@ -512,9 +501,6 @@ const validationService = createValidationService({
 });
 const aiderService = createAiderService({
   getWorkspaceRoot: workspaceService.getWorkspaceRoot,
-  getMainWindow: () => mainWindowRef,
-});
-const opencodeService = createOpencodeService({
   getMainWindow: () => mainWindowRef,
 });
 const mcpToolsService = createMcpToolsService({
@@ -2181,6 +2167,15 @@ const registerIpcHandlers = () => {
       requestedFlavor: flavor,
     };
   });
+  ipcMain.handle('lmstudio:load-model', async (_event, payload) => {
+    try {
+      const settings = getAiAssistantSettings();
+      await lmStudioService.ensureModelLoaded(settings, payload?.modelId || '');
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err.message) };
+    }
+  });
   ipcMain.handle('lmstudio:get-models', async (_event, payload) => {
     const url = buildLmStudioModelsUrl(payload || {});
     const response = await fetch(url, { method: 'GET' });
@@ -2295,10 +2290,6 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle('aider:check', async () => aiderService.checkAvailable());
 
-  ipcMain.handle('opencode:check', async () => opencodeService.checkAvailable());
-  ipcMain.handle('opencode:start-server', async (_event, payload) => opencodeService.startServer({ settings: payload?.settings }));
-  ipcMain.handle('opencode:stop-server', async () => opencodeService.stopServer());
-
   ipcMain.handle('mcp:terminalExecute', async (_event, payload) =>
     mcpToolsService.executeTerminalTool(payload || {}),
   );
@@ -2312,16 +2303,9 @@ const registerIpcHandlers = () => {
       return aiderService.sendMessage({
         traceId: String(payload?.traceId || ''),
         prompt: String(payload?.prompt || ''),
+        history: Array.isArray(payload?.history) ? payload.history : [],
         settings,
         workspaceRoot: String(payload?.workspaceRoot || workspaceService.getWorkspaceRoot()),
-      });
-    }
-    if (settings.agentType === 'opencode') {
-      return opencodeService.sendMessage({
-        traceId: String(payload?.traceId || ''),
-        prompt: String(payload?.prompt || ''),
-        history: Array.isArray(payload?.history) ? payload.history : [],
-        settings: { ...settings, workspaceRoot: String(payload?.workspaceRoot || workspaceService.getWorkspaceRoot()) },
       });
     }
     return aiOrchestratorService.sendPrompt({
@@ -2342,7 +2326,7 @@ const registerIpcHandlers = () => {
   ipcMain.handle('ai:cancel-session', async (_event, payload) => {
     const traceId = String(payload?.traceId || '');
     aiOrchestratorService.cancelSession({ traceId });
-    opencodeService.abortSession(traceId);
+    aiderService.abortSession(traceId);
   });
 
   // ── Layer 1: Project Metadata ──────────────────────────────────────
