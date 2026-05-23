@@ -1,28 +1,45 @@
 import React, { useState } from 'react';
+import { Box } from '@mui/material';
 import ActivityBar from './ActivityBar';
 import FileExplorerPanel from './FileExplorerPanel';
 import GitExplorerPanel from './GitExplorerPanel';
 import DatabaseExplorerPanel from './DatabaseExplorerPanel';
-import AiAssistantPanel from './AiAssistantPanel';
+import AiVendorsPanel from './AiVendorsPanel';
 
-function SidebarPanel({ workspaceRoot, onFileOpen, onOpenDatabaseTable, onOpenGitDiff }) {
-    const [activeTab, setActiveTab] = useState('files');
+function SidebarPanel({
+    workspaceRoot, onFileOpen, onPathDeleted, onOpenDatabaseTable, onOpenGitDiff,
+    databaseConnected, databaseName, databaseTables, databaseLoadingTables,
+    onRefreshDatabaseTables, onDisconnectDatabase,
+    activeTab: activeTabProp, onActiveTabChange,
+}) {
+    const [internalActiveTab, setInternalActiveTab] = useState('files');
+    const activeTab = activeTabProp || internalActiveTab;
+
+    const handleChangeTab = (nextTab) => {
+        if (!activeTabProp) setInternalActiveTab(nextTab);
+        onActiveTabChange?.(nextTab);
+    };
 
     return (
-        <div className="flex h-full overflow-hidden bg-[#0f1319]">
-            <ActivityBar activeTab={activeTab} onChangeTab={setActiveTab} />
-            <div className="min-h-0 flex-1 overflow-hidden">
+        <Box sx={{ display: 'flex', height: '100%', overflow: 'hidden', bgcolor: 'background.paper' }}>
+            <ActivityBar activeTab={activeTab} onChangeTab={handleChangeTab} />
+            <Box sx={{ minHeight: 0, flex: 1, overflow: 'hidden' }}>
                 {activeTab === 'files' ? (
-                    <FileExplorerPanel workspaceRoot={workspaceRoot} onFileOpen={onFileOpen} />
+                    <FileExplorerPanel workspaceRoot={workspaceRoot} onFileOpen={onFileOpen} onPathDeleted={onPathDeleted} />
                 ) : activeTab === 'git' ? (
                     <GitExplorerPanel onOpenDiff={onOpenGitDiff} />
                 ) : activeTab === 'ai' ? (
-                    <AiAssistantPanel />
+                    <AiVendorsPanel />
                 ) : (
-                    <DatabaseExplorerPanel onOpenTable={onOpenDatabaseTable} />
+                    <DatabaseExplorerPanel
+                        connected={databaseConnected} activeDatabase={databaseName}
+                        tables={databaseTables} loadingTables={databaseLoadingTables}
+                        onRefreshTables={onRefreshDatabaseTables} onOpenTable={onOpenDatabaseTable}
+                        onDisconnect={onDisconnectDatabase}
+                    />
                 )}
-            </div>
-        </div>
+            </Box>
+        </Box>
     );
 }
 

@@ -1,9 +1,7 @@
 import path from 'node:path';
 
-export const PAL_APPDATA_FOLDER = 'PalCode';
-
 export const getRuntimePaths = (electronApp) => {
-    const palRoot = path.join(electronApp.getPath('appData'), PAL_APPDATA_FOLDER);
+    const palRoot = electronApp.getPath('userData');
     const llamaServerDir = path.join(palRoot, 'llama-server');
     const modelsDir = path.join(palRoot, 'models');
     const tempDir = path.join(palRoot, 'temp');

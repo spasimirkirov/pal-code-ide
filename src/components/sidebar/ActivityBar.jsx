@@ -1,4 +1,5 @@
 import React from 'react';
+import { Box, IconButton, Tooltip } from '@mui/material';
 import { Database, Files, GitBranch, Sparkles } from 'lucide-react';
 
 const tabs = [
@@ -10,27 +11,37 @@ const tabs = [
 
 function ActivityBar({ activeTab, onChangeTab }) {
     return (
-        <aside className="flex w-14 flex-col items-center gap-2 border-r border-edge bg-panelSoft/65 py-3">
+        <Box
+            sx={{
+                display: 'flex', width: 52, flexDirection: 'column', alignItems: 'center',
+                gap: 0.75, py: 1.5,
+                borderRight: '1px solid', borderColor: 'divider',
+                bgcolor: 'rgba(17, 26, 45, 0.65)',
+            }}
+        >
             {tabs.map((tab) => {
                 const Icon = tab.icon;
                 const active = activeTab === tab.id;
-
                 return (
-                    <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => onChangeTab(tab.id)}
-                        title={tab.label}
-                        className={`grid h-10 w-10 place-items-center rounded-xl border transition ${active
-                            ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                            : 'border-slate-700/70 bg-slate-900/70 text-slate-400 hover:text-slate-200'
-                            }`}
-                    >
-                        <Icon className="h-4.5 w-4.5" />
-                    </button>
+                    <Tooltip key={tab.id} title={tab.label} placement="right" arrow>
+                        <IconButton
+                            onClick={() => onChangeTab(tab.id)}
+                            size="small"
+                            sx={{
+                                width: 36, height: 36, borderRadius: 1.5,
+                                border: '1px solid',
+                                borderColor: active ? 'rgba(43, 209, 255, 0.35)' : 'rgba(51, 65, 85, 0.7)',
+                                bgcolor: active ? 'rgba(43, 209, 255, 0.12)' : 'rgba(15, 23, 42, 0.7)',
+                                color: active ? 'primary.light' : 'text.secondary',
+                                '&:hover': { color: 'text.primary', bgcolor: 'rgba(148, 163, 184, 0.12)' },
+                            }}
+                        >
+                            <Icon size={16} />
+                        </IconButton>
+                    </Tooltip>
                 );
             })}
-        </aside>
+        </Box>
     );
 }
 

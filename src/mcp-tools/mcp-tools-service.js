@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { killProcessTree } from '../shared/process-utils';
+import { createMcpRequestHandler } from './mcp-request-handler';
 
 const decodeHtml = (input) =>
     input
@@ -13,6 +14,11 @@ const decodeHtml = (input) =>
         .trim();
 
 export const createMcpToolsService = ({ getWorkspaceRoot }) => {
+    const createRequestHandler = (options = {}) =>
+        createMcpRequestHandler({
+            ...options,
+        });
+
     const executeTerminalTool = async ({ command, shell = 'powershell', timeoutMs = 120000 }) => {
         if (!command || typeof command !== 'string') {
             throw new Error('Terminal tool requires a command string.');
@@ -117,8 +123,75 @@ export const createMcpToolsService = ({ getWorkspaceRoot }) => {
         };
     };
 
+    const fetchWebpage = async ({ url, timeoutMs = 15000 }) => {
+        const targetUrl = String(url || '').trim();
+        if (!targetUrl) {
+            throw new Error('fetchWebpage requires a url string.');
+        }
+
+        if (!/^https?:\/\//i.test(targetUrl)) {
+            throw new Error('fetchWebpage requires a valid HTTP or HTTPS URL.');
+        }
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.max(3000, Math.min(60000, Number(timeoutMs) || 15000)));
+
+        try {
+            const response = await fetch(targetUrl, {
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    Accept: 'text/html,application/xhtml+xml',
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status} ${response.statusText}`);
+            }
+
+            const html = await response.text();
+            const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
+
+            const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+            const bodyText = bodyMatch
+                ? bodyMatch[1]
+                    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+                    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+                    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, ' ')
+                    .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, ' ')
+                    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, ' ')
+                    .replace(/<[^>]+>/g, ' ')
+                    .replace(/&[#a-zA-Z0-9]+;/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                : '';
+
+            const maxLength = 50000;
+            const content = bodyText.slice(0, maxLength);
+
+            return {
+                ok: true,
+                url: targetUrl,
+                title,
+                text: content,
+                truncated: bodyText.length > maxLength,
+                length: content.length,
+            };
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new Error(`Request timed out after ${timeoutMs}ms.`);
+            }
+            throw new Error(`Failed to fetch webpage: ${error.message}`);
+        } finally {
+            clearTimeout(timer);
+        }
+    };
+
     return {
+        createRequestHandler,
         executeTerminalTool,
         duckduckgoSearch,
+        fetchWebpage,
     };
 };

@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ChevronDown,
+    ChevronRight,
     Maximize2,
-    MessageSquare,
     Minimize2,
     Minus,
     Square,
@@ -12,6 +12,13 @@ import {
 const runtime = window.palRuntime;
 
 function MenuDropdown({ label, items, open, onToggle, onAction }) {
+    const [openSubmenuId, setOpenSubmenuId] = useState(null);
+
+    useEffect(() => {
+        if (!open) {
+            setOpenSubmenuId(null);
+        }
+    }, [open]);
 
     return (
         <div className="relative" style={{ WebkitAppRegion: 'no-drag' }}>
@@ -27,17 +34,75 @@ function MenuDropdown({ label, items, open, onToggle, onAction }) {
             {open && (
                 <div className="absolute left-0 top-8 z-30 w-52 rounded-lg border border-slate-700/70 bg-slate-900/95 p-1 shadow-2xl">
                     {items.map((item) => (
-                        <button
-                            key={`${label}-${item.id}`}
-                            type="button"
-                            onClick={() => {
-                                onAction(item.id);
-                            }}
-                            className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-slate-200 hover:bg-slate-800"
-                        >
-                            <span>{item.label}</span>
-                            {item.hint ? <span className="text-slate-500">{item.hint}</span> : null}
-                        </button>
+                        item.separator ? (
+                            <div key={`${label}-${item.id}`} className="my-1 h-px bg-slate-700/70" />
+                        ) : item.submenu ? (
+                            <div
+                                key={`${label}-${item.id}`}
+                                className="relative"
+                                onMouseEnter={() => setOpenSubmenuId(item.id)}
+                                onFocus={() => setOpenSubmenuId(item.id)}
+                            >
+                                <button
+                                    type="button"
+                                    disabled={Boolean(item.disabled)}
+                                    className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs ${item.disabled
+                                        ? 'cursor-not-allowed text-slate-500'
+                                        : 'text-slate-200 hover:bg-slate-800'
+                                        }`}
+                                >
+                                    <span>{item.label}</span>
+                                    <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
+                                </button>
+
+                                {openSubmenuId === item.id && !item.disabled && (
+                                    <div className="absolute left-full top-0 z-40 ml-1 w-72 rounded-lg border border-slate-700/70 bg-slate-900/95 p-1 shadow-2xl">
+                                        {item.submenu.map((subItem) => (
+                                            subItem.separator ? (
+                                                <div key={`${label}-${item.id}-${subItem.id}`} className="my-1 h-px bg-slate-700/70" />
+                                            ) : (
+                                                <button
+                                                    key={`${label}-${item.id}-${subItem.id}`}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        if (!subItem.disabled) {
+                                                            onAction(subItem.id);
+                                                        }
+                                                    }}
+                                                    disabled={Boolean(subItem.disabled)}
+                                                    className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs ${subItem.disabled
+                                                        ? 'cursor-not-allowed text-slate-500'
+                                                        : 'text-slate-200 hover:bg-slate-800'
+                                                        }`}
+                                                    title={subItem.label}
+                                                >
+                                                    <span className="truncate">{subItem.label}</span>
+                                                    {subItem.hint ? <span className="ml-2 shrink-0 text-slate-500">{subItem.hint}</span> : null}
+                                                </button>
+                                            )
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        ) : (
+                            <button
+                                key={`${label}-${item.id}`}
+                                type="button"
+                                onClick={() => {
+                                    if (!item.disabled) {
+                                        onAction(item.id);
+                                    }
+                                }}
+                                disabled={Boolean(item.disabled)}
+                                className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs ${item.disabled
+                                    ? 'cursor-not-allowed text-slate-500'
+                                    : 'text-slate-200 hover:bg-slate-800'
+                                    }`}
+                            >
+                                <span>{item.label}</span>
+                                {item.hint ? <span className="text-slate-500">{item.hint}</span> : null}
+                            </button>
+                        )
                     ))}
                 </div>
             )}
@@ -47,13 +112,14 @@ function MenuDropdown({ label, items, open, onToggle, onAction }) {
 
 function IdeTitleBar({
     activeFilePath,
-    llamaBusy,
-    isRunning,
-    isStarting,
-    isStopping,
-    onToggleLlama,
     onNewFile,
     onOpenDatabaseView,
+    recentWorkspaces = [],
+    currentWorkspacePath = '',
+    onOpenFolder,
+    onOpenRecentWorkspace,
+    onClearRecentWorkspaces,
+    onExitIde,
     onRefreshGit,
     chatVisible,
     onToggleChat,
@@ -85,11 +151,47 @@ function IdeTitleBar({
         setOpenMenu((current) => (current === label ? null : label));
     };
 
+    const formatRecentLabel = (folderPath) => {
+        const normalized = String(folderPath || '').trim();
+        if (!normalized) {
+            return '(unknown)';
+        }
+
+        const parts = normalized.split(/[\\/]/).filter(Boolean);
+        return parts[parts.length - 1] || normalized;
+    };
+
     const menuItems = useMemo(
         () => ({
             File: [
                 { id: 'new-file', label: 'New File', hint: 'Ctrl+N' },
-                { id: 'open-db', label: 'Open Database Viewer' },
+                { id: 'open-folder', label: 'Open Folder...' },
+                { id: 'open-recent-separator', separator: true },
+                {
+                    id: 'open-recent',
+                    label: 'Open Recent',
+                    submenu: [
+                        ...(recentWorkspaces
+                            .filter((folderPath) => String(folderPath || '').trim().toLowerCase() !== String(currentWorkspacePath || '').trim().toLowerCase())
+                            .length
+                            ? recentWorkspaces
+                                .filter((folderPath) => String(folderPath || '').trim().toLowerCase() !== String(currentWorkspacePath || '').trim().toLowerCase())
+                                .map((folderPath) => ({
+                                    id: `open-recent:${encodeURIComponent(folderPath)}`,
+                                    label: folderPath,
+                                    hint: formatRecentLabel(folderPath),
+                                }))
+                            : [{ id: 'open-recent-empty', label: 'No recent folders', disabled: true }]),
+                        { id: 'open-recent-clear-separator', separator: true },
+                        {
+                            id: 'open-recent-clear',
+                            label: 'Clear Recently Opened',
+                            disabled: recentWorkspaces.length === 0,
+                        },
+                    ],
+                },
+                { id: 'file-bottom-separator', separator: true },
+                { id: 'exit-ide', label: 'Exit IDE', hint: 'Alt+F4' },
             ],
             Edit: [
                 { id: 'cut', label: 'Cut', hint: 'Ctrl+X' },
@@ -102,15 +204,11 @@ function IdeTitleBar({
                 { id: 'reset-layout', label: 'Reset Layout' },
                 { id: 'toggle-max', label: 'Toggle Maximize', hint: 'F11' },
             ],
-            Terminal: [
-                { id: 'llama-toggle', label: isRunning ? 'Stop Llama Server' : 'Start Llama Server' },
-                { id: 'git-refresh', label: 'Refresh Source Control' },
-            ],
             Help: [
                 { id: 'about', label: 'About PAL IDE' },
             ],
         }),
-        [chatVisible, isRunning],
+        [chatVisible, recentWorkspaces, currentWorkspacePath],
     );
 
     const handleMenuAction = async (action) => {
@@ -121,8 +219,30 @@ function IdeTitleBar({
             return;
         }
 
-        if (action === 'open-db' || action === 'toggle-db') {
+        if (action === 'toggle-db') {
             onOpenDatabaseView?.();
+            return;
+        }
+
+        if (action === 'open-folder') {
+            await onOpenFolder?.();
+            return;
+        }
+
+        if (String(action).startsWith('open-recent:')) {
+            const encodedPath = String(action).slice('open-recent:'.length);
+            const decodedPath = decodeURIComponent(encodedPath);
+            await onOpenRecentWorkspace?.(decodedPath);
+            return;
+        }
+
+        if (action === 'open-recent-clear') {
+            await onClearRecentWorkspaces?.();
+            return;
+        }
+
+        if (action === 'exit-ide') {
+            await onExitIde?.();
             return;
         }
 
@@ -138,16 +258,6 @@ function IdeTitleBar({
 
         if (action === 'toggle-max') {
             await onWindowToggleMaximize?.();
-            return;
-        }
-
-        if (action === 'llama-toggle') {
-            await onToggleLlama?.();
-            return;
-        }
-
-        if (action === 'git-refresh') {
-            onRefreshGit?.();
             return;
         }
 
@@ -185,24 +295,6 @@ function IdeTitleBar({
             </div>
 
             <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' }}>
-                <button
-                    type="button"
-                    onClick={() => void onToggleLlama?.()}
-                    disabled={llamaBusy || isStarting || isStopping}
-                    className="rounded-md border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-cyan-100 hover:bg-cyan-300/20 disabled:opacity-60"
-                >
-                    {isStarting ? 'Starting...' : isStopping ? 'Stopping...' : isRunning ? 'Stop Llama' : 'Start Llama'}
-                </button>
-
-                <button
-                    type="button"
-                    onClick={() => onToggleChat?.()}
-                    className={`grid h-7 w-8 place-items-center rounded-md ${chatVisible ? 'bg-cyan-300/15 text-cyan-100' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
-                    title={chatVisible ? 'Hide Chat' : 'Show Chat'}
-                >
-                    <MessageSquare className="h-3.5 w-3.5" />
-                </button>
-
                 <button
                     type="button"
                     onClick={() => void onWindowMinimize?.()}

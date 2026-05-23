@@ -1,443 +1,333 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, DownloadCloud, LoaderCircle, RefreshCw, Sparkles } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+    Box, Typography, TextField, Select, MenuItem, IconButton,
+    Alert, CircularProgress, Tooltip, Chip, Switch, FormControlLabel,
+    Paper,
+} from '@mui/material';
+import { RefreshCw, Sparkles, Bot, CheckCircle2, XCircle, Globe, Server, Cpu, Cog } from 'lucide-react';
 
 const runtime = window.palRuntime;
 
 const defaultSettings = {
-    engine: 'llama-server',
-    roleMappings: {
-        coding: '',
-        vision: '',
-        autocomplete: '',
-    },
-    lmStudio: {
-        endpointUrl: 'http://localhost:1234',
-        port: '1234',
-        activeModel: '',
-    },
-    llamaServer: {
-        selectedFlavor: 'auto',
-    },
+    engine: 'lm-studio',
+    agentType: 'built-in',
+    lmStudio: { endpointUrl: 'http://localhost:1234', port: '1234', activeModel: '' },
+    aider: { autoCommits: false, autoLint: true, mapTokens: 1024 },
+    opencode: { model: '', apiKey: '' },
 };
 
-const LLAMA_SERVER_FLAVORS = [
-    { value: 'auto', label: 'Auto' },
-    { value: 'cpu', label: 'CPU' },
-    { value: 'cuda', label: 'CUDA' },
-    { value: 'vulkan', label: 'Vulkan' },
-];
-
 function AiAssistantPanel() {
-    const [activeSubTab, setActiveSubTab] = useState('llama-server');
     const [settings, setSettings] = useState(defaultSettings);
-    const [localModels, setLocalModels] = useState([]);
-    const [modelsDir, setModelsDir] = useState('');
-    const [loadingModels, setLoadingModels] = useState(false);
-    const [llamaServers, setLlamaServers] = useState([]);
-    const [selectedServerFlavor, setSelectedServerFlavor] = useState('auto');
-    const [serverDownloading, setServerDownloading] = useState(false);
-    const [serverError, setServerError] = useState('');
     const [lmStudioModels, setLmStudioModels] = useState([]);
     const [lmStudioLoading, setLmStudioLoading] = useState(false);
     const [lmStudioError, setLmStudioError] = useState('');
-
-    const resolveLocalModelPath = (value, models) => {
-        const nextValue = String(value || '').trim();
-        if (!nextValue) {
-            return '';
-        }
-
-        const directMatch = models.find((model) => model.localPath === nextValue);
-        if (directMatch) {
-            return directMatch.localPath;
-        }
-
-        const byFileName = models.find((model) => model.fileName === nextValue || model.name === nextValue);
-        return byFileName ? byFileName.localPath : nextValue;
-    };
+    const [lmStudioReachable, setLmStudioReachable] = useState(true);
+    const [aiderStatus, setAiderStatus] = useState(null);
+    const [aiderLoading, setAiderLoading] = useState(false);
+    const [opencodeStatus, setOpencodeStatus] = useState(null);
+    const [opencodeLoading, setOpencodeLoading] = useState(false);
 
     const hydrate = async () => {
         try {
-            const [nextSettings, localState, serverState] = await Promise.all([
-                runtime?.getAiAssistantSettings?.(),
-                runtime?.checkLocalModels?.(),
-                runtime?.checkLocalLlamaServers?.(),
-            ]);
-
-            const nextLocalModels = Array.isArray(localState?.models) ? localState.models : [];
-            if (nextSettings) {
-                const savedFlavor = String(nextSettings.llamaServer?.selectedFlavor || 'auto').toLowerCase();
-                const selectedFlavor = LLAMA_SERVER_FLAVORS.some((item) => item.value === savedFlavor)
-                    ? savedFlavor
-                    : 'auto';
-
-                setSettings({
-                    ...nextSettings,
-                    roleMappings: {
-                        coding: resolveLocalModelPath(nextSettings.roleMappings?.coding, nextLocalModels),
-                        vision: resolveLocalModelPath(nextSettings.roleMappings?.vision, nextLocalModels),
-                        autocomplete: resolveLocalModelPath(nextSettings.roleMappings?.autocomplete, nextLocalModels),
-                    },
-                    llamaServer: {
-                        selectedFlavor,
-                    },
-                });
-                setSelectedServerFlavor(selectedFlavor);
-
-                const migrated = {
-                    engine: nextSettings.engine,
-                    roleMappings: {
-                        coding: resolveLocalModelPath(nextSettings.roleMappings?.coding, nextLocalModels),
-                        vision: resolveLocalModelPath(nextSettings.roleMappings?.vision, nextLocalModels),
-                        autocomplete: resolveLocalModelPath(nextSettings.roleMappings?.autocomplete, nextLocalModels),
-                    },
-                    lmStudio: nextSettings.lmStudio,
-                    llamaServer: {
-                        selectedFlavor,
-                    },
-                };
-
-                if (JSON.stringify(migrated) !== JSON.stringify(nextSettings)) {
-                    void runtime?.setAiAssistantSettings?.(migrated);
-                }
-            }
-            if (localState) {
-                setLocalModels(nextLocalModels);
-                setModelsDir(String(localState.modelsDir || ''));
-            }
-            setLlamaServers(Array.isArray(serverState?.versions) ? serverState.versions : []);
-        } catch {
-            // Ignore hydrate errors and keep defaults.
-        }
+            const nextSettings = await runtime?.getAiAssistantSettings?.();
+            if (nextSettings) setSettings(nextSettings);
+        } catch { /* */ }
     };
 
     useEffect(() => {
         let mounted = true;
-        let unsubscribe = null;
-
-        const init = async () => {
-            if (!mounted) {
-                return;
-            }
-            setLoadingModels(true);
-            await hydrate();
-            if (mounted) {
-                setLoadingModels(false);
-            }
-        };
-
+        const init = async () => { if (mounted) await hydrate(); };
         void init();
-
-        return () => {
-            mounted = false;
-            if (unsubscribe) {
-                unsubscribe();
-            }
-        };
+        return () => { mounted = false; };
     }, []);
-
-    const downloadedModels = useMemo(
-        () => localModels.filter((model) => model.downloaded),
-        [localModels],
-    );
 
     const updateSettings = async (patch) => {
         const next = await runtime?.setAiAssistantSettings?.(patch);
-        if (next) {
-            setSettings(next);
-        }
-    };
-
-    const startLlamaServerDownload = async () => {
-        try {
-            setServerError('');
-            setServerDownloading(true);
-            await runtime?.downloadLlamaServerVersion?.({ flavor: selectedServerFlavor });
-            await hydrate();
-        } catch (error) {
-            setServerError(error?.message || 'Download failed.');
-        } finally {
-            setServerDownloading(false);
-        }
-    };
-
-    const handleFlavorChange = (value) => {
-        setSelectedServerFlavor(value);
-        void updateSettings({
-            llamaServer: {
-                selectedFlavor: value,
-            },
-        });
+        if (next) setSettings(next);
     };
 
     const refreshLmStudioModels = async () => {
+        setLmStudioError('');
+        setLmStudioLoading(true);
         try {
-            setLmStudioError('');
-            setLmStudioLoading(true);
-            const response = await runtime?.lmStudioGetModels?.({
-                endpointUrl: settings.lmStudio.endpointUrl,
-                port: settings.lmStudio.port,
-            });
+            const response = await runtime?.lmStudioGetModels?.({ endpointUrl: settings.lmStudio.endpointUrl, port: settings.lmStudio.port });
             setLmStudioModels(Array.isArray(response?.models) ? response.models : []);
+            setLmStudioReachable(true);
         } catch (error) {
-            setLmStudioError(error?.message || 'Could not fetch LM Studio models.');
-        } finally {
-            setLmStudioLoading(false);
-        }
+            setLmStudioReachable(false);
+            setLmStudioModels([]);
+            setLmStudioError(error?.message || "Can't reach LM Studio API.");
+        } finally { setLmStudioLoading(false); }
     };
 
+    const checkAider = async () => {
+        setAiderLoading(true);
+        try {
+            const result = await runtime?.aiderCheck?.();
+            setAiderStatus(result || { available: false, error: 'No response' });
+        } catch { setAiderStatus({ available: false, error: 'Failed to check Aider' }); }
+        finally { setAiderLoading(false); }
+    };
+
+    const checkOpencode = async () => {
+        setOpencodeLoading(true);
+        try {
+            const result = await runtime?.opencodeCheck?.();
+            setOpencodeStatus(result || { available: false, error: 'No response' });
+        } catch { setOpencodeStatus({ available: false, error: 'Failed to check OpenCode' }); }
+        finally { setOpencodeLoading(false); }
+    };
+
+    useEffect(() => {
+        void refreshLmStudioModels();
+        void checkAider();
+        void checkOpencode();
+    }, []);
+
     return (
-        <section className="h-full overflow-y-auto bg-[#0f1319] p-3 text-xs text-slate-200">
-            <div className="mb-3 flex items-center gap-2 border-b border-slate-800 pb-2">
-                <Sparkles className="h-4 w-4 text-cyan-200" />
-                <h3 className="font-semibold uppercase tracking-[0.1em] text-cyan-100">AI Assistant</h3>
-            </div>
+        <Box sx={{ height: '100%', overflowY: 'auto', bgcolor: 'background.default' }}>
+            <Box sx={{ px: 4, py: 3, maxWidth: 720, mx: 'auto' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 3 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(43, 209, 255, 0.12)' }}>
+                        <Cog size={18} style={{ color: '#2bd1ff' }} />
+                    </Box>
+                    <Box>
+                        <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '1rem', letterSpacing: '0.01em', color: 'text.primary' }}>
+                            AI Assistant
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.7rem' }}>
+                            Configure provider, model, and agent engine
+                        </Typography>
+                    </Box>
+                </Box>
 
-            <div className="mb-3 grid grid-cols-2 gap-2">
-                <button
-                    type="button"
-                    onClick={() => setActiveSubTab('llama-server')}
-                    className={`rounded-lg border px-2 py-1.5 font-medium transition ${activeSubTab === 'llama-server'
-                        ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                        : 'border-slate-700 bg-slate-900/70 text-slate-300'
-                        }`}
-                >
-                    Llama.cpp Server
-                </button>
-                <button
-                    type="button"
-                    onClick={() => setActiveSubTab('lm-studio')}
-                    className={`rounded-lg border px-2 py-1.5 font-medium transition ${activeSubTab === 'lm-studio'
-                        ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                        : 'border-slate-700 bg-slate-900/70 text-slate-300'
-                        }`}
-                >
-                    LM Studio
-                </button>
-            </div>
+                {/* Provider */}
+                <Paper sx={{ p: 3, mb: 2.5, borderRadius: 2, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2.5 }}>
+                        <Server size={16} style={{ color: '#2bd1ff' }} />
+                        <Typography variant="subtitle2" sx={{ color: 'primary.light', fontSize: '0.7rem' }}>Provider</Typography>
+                    </Box>
 
-            {activeSubTab === 'llama-server' ? (
-                <div className="space-y-3">
-                    <p className="text-[11px] text-slate-400">Managed models folder: {modelsDir || 'loading...'}</p>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2.5, p: 1.5, borderRadius: 1.5, bgcolor: 'rgba(13, 18, 37, 0.5)' }}>
+                        <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: lmStudioReachable ? '#4ade80' : '#fb7185', flexShrink: 0 }} />
+                        <Box sx={{ flex: 1 }}>
+                            <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>LM Studio</Typography>
+                            <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>
+                                {lmStudioReachable ? 'Reachable' : 'Unreachable'}
+                            </Typography>
+                        </Box>
+                        {lmStudioLoading && <CircularProgress size={14} />}
+                    </Box>
 
-                    <div className="rounded-lg border border-slate-700/80 bg-slate-900/70 p-3">
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                            <h4 className="font-semibold uppercase tracking-[0.09em] text-slate-300">Llama.cpp Server Versions</h4>
-                            <button
-                                type="button"
-                                onClick={() => void hydrate()}
-                                className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] text-slate-300 hover:text-cyan-100"
-                            >
-                                Refresh
-                            </button>
-                        </div>
-                        <div className="mb-3 flex items-end gap-2">
-                            <label className="flex-1">
-                                <span className="mb-1 block text-[11px] text-slate-400">Select Version</span>
-                                <select
-                                    value={selectedServerFlavor}
-                                    onChange={(event) => handleFlavorChange(event.target.value)}
-                                    className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-100"
-                                >
-                                    {LLAMA_SERVER_FLAVORS.map((item) => (
-                                        <option key={item.value} value={item.value}>{item.label}</option>
-                                    ))}
-                                </select>
-                            </label>
-                            <button
-                                type="button"
-                                onClick={() => void startLlamaServerDownload()}
-                                disabled={serverDownloading}
-                                className="inline-flex items-center gap-1 rounded-lg border border-cyan-300/35 bg-cyan-400/10 px-3 py-2 text-[11px] text-cyan-100 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                                {serverDownloading ? (
-                                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                                ) : (
-                                    <DownloadCloud className="h-3.5 w-3.5" />
-                                )}
-                                Download
-                            </button>
-                        </div>
-                        <div className="space-y-2">
-                            {LLAMA_SERVER_FLAVORS.map((flavor) => {
-                                const version = llamaServers.find((item) => item.flavor === flavor.value);
-                                return (
-                                    <div key={flavor.value} className="flex items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2">
-                                        <div>
-                                            <p className="text-sm text-slate-100">{flavor.label}</p>
-                                            <p className="text-[10px] text-slate-500">
-                                                {version?.installed ? 'Installed' : 'Not installed'}
-                                                {version?.active ? ' · Active' : ''}
-                                            </p>
-                                        </div>
-                                        {version?.installed ? (
-                                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300">
-                                                <CheckCircle2 className="h-3 w-3" /> Ready
-                                            </span>
-                                        ) : (
-                                            <span className="text-[10px] text-slate-500">Use the selector above to download</span>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
-                        {serverError && (
-                            <p className="mt-3 rounded-md border border-rose-400/30 bg-rose-500/10 p-2 text-[11px] text-rose-200">
-                                {serverError}
-                            </p>
-                        )}
-                    </div>
-
-                    {loadingModels ? (
-                        <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3 text-slate-400">Loading model list...</div>
-                    ) : (
-                        localModels.length ? localModels.map((model) => {
-                            return (
-                                <article key={model.id} className="rounded-lg border border-slate-700/80 bg-slate-900/70 p-3">
-                                    <div className="flex items-start justify-between gap-2">
-                                        <div>
-                                            <p className="font-semibold text-slate-100">{model.name}</p>
-                                            <p className="mt-1 break-all text-[10px] text-slate-500">{model.fileName}</p>
-                                        </div>
-                                        {model.downloaded && (
-                                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
-                                                <CheckCircle2 className="h-3 w-3" />
-                                                Downloaded
-                                            </span>
-                                        )}
-                                    </div>
-                                </article>
-                            );
-                        }) : (
-                            <div className="rounded-lg border border-dashed border-slate-700/70 bg-slate-900/35 p-3 text-xs text-slate-500">
-                                No local GGUF files found in the models folder.
-                            </div>
-                        )
-                    )}
-
-                    <div className="rounded-lg border border-slate-700/80 bg-slate-900/70 p-3">
-                        <h4 className="mb-2 font-semibold uppercase tracking-[0.09em] text-slate-300">Role Mapping</h4>
-                        <div className="space-y-2">
-                            <label className="block text-slate-300">
-                                <span className="mb-1 block">Primary Coding</span>
-                                <select
-                                    value={settings.roleMappings.coding || ''}
-                                    onChange={(event) => void updateSettings({ roleMappings: { coding: event.target.value } })}
-                                    className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
-                                >
-                                    <option value="">Select local model</option>
-                                    {downloadedModels.map((model) => (
-                                        <option key={model.id} value={model.localPath}>{model.name}</option>
-                                    ))}
-                                </select>
-                            </label>
-                            <label className="block text-slate-300">
-                                <span className="mb-1 block">Primary Vision</span>
-                                <select
-                                    value={settings.roleMappings.vision || ''}
-                                    onChange={(event) => void updateSettings({ roleMappings: { vision: event.target.value } })}
-                                    className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
-                                >
-                                    <option value="">Select local model</option>
-                                    {downloadedModels.map((model) => (
-                                        <option key={model.id} value={model.localPath}>{model.name}</option>
-                                    ))}
-                                </select>
-                            </label>
-                            <label className="block text-slate-300">
-                                <span className="mb-1 block">Primary Autocomplete</span>
-                                <select
-                                    value={settings.roleMappings.autocomplete || ''}
-                                    onChange={(event) => void updateSettings({ roleMappings: { autocomplete: event.target.value } })}
-                                    className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
-                                >
-                                    <option value="">Select local model</option>
-                                    {downloadedModels.map((model) => (
-                                        <option key={model.id} value={model.localPath}>{model.name}</option>
-                                    ))}
-                                </select>
-                            </label>
-                        </div>
-                    </div>
-                </div>
-            ) : (
-                <div className="space-y-3">
-                    <label className="block">
-                        <span className="mb-1 block text-slate-300">Endpoint URL</span>
-                        <input
-                            type="text"
+                    <Box sx={{ display: 'flex', gap: 2 }}>
+                        <TextField
+                            fullWidth size="small" label="Endpoint URL"
                             value={settings.lmStudio.endpointUrl}
-                            onChange={(event) => {
-                                const endpointUrl = event.target.value;
-                                setSettings((current) => ({
-                                    ...current,
-                                    lmStudio: {
-                                        ...current.lmStudio,
-                                        endpointUrl,
-                                    },
-                                }));
-                            }}
+                            onChange={(e) => setSettings((s) => ({ ...s, lmStudio: { ...s.lmStudio, endpointUrl: e.target.value } }))}
                             onBlur={() => void updateSettings({ lmStudio: { endpointUrl: settings.lmStudio.endpointUrl } })}
-                            className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
                             placeholder="http://localhost:1234"
+                            sx={{ '& .MuiInputBase-input': { fontSize: '0.8rem' }, '& .MuiInputLabel-root': { fontSize: '0.75rem' } }}
                         />
-                    </label>
-                    <label className="block">
-                        <span className="mb-1 block text-slate-300">Port</span>
-                        <input
-                            type="text"
+                        <TextField
+                            size="small" label="Port" sx={{ width: 120 }}
                             value={settings.lmStudio.port}
-                            onChange={(event) => {
-                                const port = event.target.value;
-                                setSettings((current) => ({
-                                    ...current,
-                                    lmStudio: {
-                                        ...current.lmStudio,
-                                        port,
-                                    },
-                                }));
-                            }}
+                            onChange={(e) => setSettings((s) => ({ ...s, lmStudio: { ...s.lmStudio, port: e.target.value } }))}
                             onBlur={() => void updateSettings({ lmStudio: { port: settings.lmStudio.port } })}
-                            className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
                             placeholder="1234"
+                            slotProps={{ input: { sx: { fontSize: '0.8rem' } } }}
+                            sx={{ '& .MuiInputLabel-root': { fontSize: '0.75rem' } }}
                         />
-                    </label>
+                    </Box>
 
-                    <button
-                        type="button"
-                        onClick={() => void refreshLmStudioModels()}
-                        disabled={lmStudioLoading}
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-300/40 bg-cyan-400/12 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                        {lmStudioLoading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                        🔄 Get Available Models
-                    </button>
-
-                    <label className="block">
-                        <span className="mb-1 block text-slate-300">Select Active LM Studio Model</span>
-                        <select
-                            value={settings.lmStudio.activeModel}
-                            onChange={(event) => {
-                                const activeModel = event.target.value;
-                                void updateSettings({ lmStudio: { activeModel } });
-                            }}
-                            className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
-                        >
-                            <option value="">Select model</option>
-                            {lmStudioModels.map((model) => (
-                                <option key={model.id} value={model.id}>{model.id}</option>
-                            ))}
-                        </select>
-                    </label>
-
-                    {lmStudioError && (
-                        <p className="rounded-md border border-rose-400/30 bg-rose-500/10 p-2 text-[11px] text-rose-200">
-                            {lmStudioError}
-                        </p>
+                    {!lmStudioReachable && !lmStudioError && (
+                        <Alert severity="warning" sx={{ mt: 2, py: 0.75, px: 2, fontSize: '0.75rem', borderRadius: 1.5 }}>
+                            LM Studio is unreachable. Start it, then refresh models.
+                        </Alert>
                     )}
-                </div>
-            )}
-        </section>
+                    {lmStudioError && (
+                        <Alert severity="error" sx={{ mt: 2, py: 0.75, px: 2, fontSize: '0.75rem', borderRadius: 1.5 }}>{lmStudioError}</Alert>
+                    )}
+                </Paper>
+
+                {/* Model */}
+                <Paper sx={{ p: 3, mb: 2.5, borderRadius: 2, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2.5 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Cpu size={16} style={{ color: '#2bd1ff' }} />
+                            <Typography variant="subtitle2" sx={{ color: 'primary.light', fontSize: '0.7rem' }}>Model</Typography>
+                        </Box>
+                        <Tooltip title="Refresh models">
+                            <IconButton size="small" onClick={() => void refreshLmStudioModels()} disabled={lmStudioLoading} sx={{ width: 28, height: 28 }}>
+                                {lmStudioLoading ? <CircularProgress size={14} /> : <RefreshCw size={14} />}
+                            </IconButton>
+                        </Tooltip>
+                    </Box>
+
+                    <Select
+                        fullWidth size="small"
+                        value={settings.lmStudio.activeModel}
+                        disabled={!lmStudioReachable || lmStudioLoading}
+                        onChange={(e) => void updateSettings({ lmStudio: { activeModel: e.target.value } })}
+                        displayEmpty
+                        sx={{ fontSize: '0.8rem', '& .MuiSelect-select': { py: 1 } }}
+                    >
+                        <MenuItem value="" disabled><em>Select a model</em></MenuItem>
+                        {lmStudioModels.map((m) => (<MenuItem key={m.id} value={m.id}>{m.id}</MenuItem>))}
+                    </Select>
+
+                    {settings.lmStudio.activeModel && (
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mt: 1.5 }}>
+                            <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'success.main' }} />
+                            <Typography variant="caption" sx={{ color: 'success.light', fontSize: '0.7rem' }}>
+                                Active: {settings.lmStudio.activeModel}
+                            </Typography>
+                        </Box>
+                    )}
+                </Paper>
+
+                {/* Agent Engine */}
+                <Paper sx={{ p: 3, borderRadius: 2, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
+                        <Bot size={16} style={{ color: '#2bd1ff' }} />
+                        <Typography variant="subtitle2" sx={{ color: 'primary.light', fontSize: '0.7rem' }}>Agent Engine</Typography>
+                    </Box>
+
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        {/* Built-in */}
+                        <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(43, 209, 255, 0.04)', border: '1px solid', borderColor: 'rgba(43, 209, 255, 0.15)' }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(43, 209, 255, 0.1)' }}>
+                                    <Sparkles size={16} style={{ color: '#2bd1ff' }} />
+                                </Box>
+                                <Box sx={{ flex: 1 }}>
+                                    <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>Built-in Agent</Typography>
+                                    <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
+                                        PAL IDE's native agent with tool orchestration, file editing, and code search
+                                    </Typography>
+                                </Box>
+                                <Chip
+                                    label="Default"
+                                    size="small"
+                                    sx={{ height: 22, fontSize: '0.6rem', bgcolor: 'rgba(43, 209, 255, 0.1)', color: 'primary.light', fontWeight: 600, borderRadius: 1 }}
+                                />
+                            </Box>
+                        </Box>
+
+                        {/* Aider */}
+                        <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(74, 222, 128, 0.04)', border: '1px solid', borderColor: 'divider' }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(74, 222, 128, 0.1)' }}>
+                                    <Bot size={16} style={{ color: '#4ade80' }} />
+                                </Box>
+                                <Box sx={{ flex: 1 }}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>Aider</Typography>
+                                        {aiderStatus && (
+                                            <Chip
+                                                label={aiderStatus.available ? 'Ready' : 'Unavailable'}
+                                                size="small"
+                                                sx={{
+                                                    height: 20, fontSize: '0.55rem', fontWeight: 600, borderRadius: 1,
+                                                    bgcolor: aiderStatus.available ? 'rgba(74, 222, 128, 0.12)' : 'rgba(251, 113, 133, 0.12)',
+                                                    color: aiderStatus.available ? 'success.light' : 'error.light',
+                                                }}
+                                            />
+                                        )}
+                                    </Box>
+                                    <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
+                                        External agent via CLI with auto-commit and lint support
+                                    </Typography>
+                                </Box>
+                                <Tooltip title="Check Aider availability">
+                                    <IconButton size="small" onClick={() => void checkAider()} disabled={aiderLoading} sx={{ width: 28, height: 28 }}>
+                                        {aiderLoading ? <CircularProgress size={12} /> : <RefreshCw size={13} />}
+                                    </IconButton>
+                                </Tooltip>
+                            </Box>
+
+                            <FormControlLabel
+                                control={
+                                    <Switch
+                                        size="small"
+                                        checked={settings.agentType === 'aider'}
+                                        onChange={(e) => void updateSettings({ agentType: e.target.checked ? 'aider' : 'built-in' })}
+                                    />
+                                }
+                                label="Use Aider as agent backend"
+                                sx={{ '& .MuiTypography-root': { fontSize: '0.75rem' } }}
+                            />
+
+                            {aiderStatus && !aiderStatus.available && (
+                                <Alert severity="error" sx={{ mt: 1.5, py: 0.5, px: 1.5, fontSize: '0.6875rem', borderRadius: 1.5 }}>
+                                    {aiderStatus.error || 'Aider CLI not found in PATH'}
+                                </Alert>
+                            )}
+                            {aiderStatus?.available && (
+                                <Typography variant="caption" sx={{ color: 'success.light', fontSize: '0.65rem', display: 'block', mt: 0.5, ml: 5 }}>
+                                    Version {aiderStatus.version}
+                                </Typography>
+                            )}
+                        </Box>
+
+                        {/* OpenCode */}
+                        <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(105, 168, 255, 0.04)', border: '1px solid', borderColor: 'divider' }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(105, 168, 255, 0.1)' }}>
+                                    <Globe size={16} style={{ color: '#69a8ff' }} />
+                                </Box>
+                                <Box sx={{ flex: 1 }}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>OpenCode</Typography>
+                                        {opencodeStatus && (
+                                            <Chip
+                                                label={opencodeStatus.available ? 'Ready' : 'Unavailable'}
+                                                size="small"
+                                                sx={{
+                                                    height: 20, fontSize: '0.55rem', fontWeight: 600, borderRadius: 1,
+                                                    bgcolor: opencodeStatus.available ? 'rgba(74, 222, 128, 0.12)' : 'rgba(251, 113, 133, 0.12)',
+                                                    color: opencodeStatus.available ? 'success.light' : 'error.light',
+                                                }}
+                                            />
+                                        )}
+                                    </Box>
+                                    <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
+                                        Autonomous coding agent from opencode.ai
+                                    </Typography>
+                                </Box>
+                                <Tooltip title="Check OpenCode availability">
+                                    <IconButton size="small" onClick={() => void checkOpencode()} disabled={opencodeLoading} sx={{ width: 28, height: 28 }}>
+                                        {opencodeLoading ? <CircularProgress size={12} /> : <RefreshCw size={13} />}
+                                    </IconButton>
+                                </Tooltip>
+                            </Box>
+
+                            <FormControlLabel
+                                control={
+                                    <Switch
+                                        size="small"
+                                        checked={settings.agentType === 'opencode'}
+                                        onChange={(e) => void updateSettings({ agentType: e.target.checked ? 'opencode' : 'built-in' })}
+                                    />
+                                }
+                                label="Use OpenCode as agent backend"
+                                sx={{ '& .MuiTypography-root': { fontSize: '0.75rem' } }}
+                            />
+
+                            {opencodeStatus && !opencodeStatus.available && (
+                                <Alert severity="error" sx={{ mt: 1.5, py: 0.5, px: 1.5, fontSize: '0.6875rem', borderRadius: 1.5 }}>
+                                    {opencodeStatus.error || 'OpenCode CLI not found in PATH'}
+                                </Alert>
+                            )}
+                            {opencodeStatus?.available && (
+                                <Typography variant="caption" sx={{ color: 'success.light', fontSize: '0.65rem', display: 'block', mt: 0.5, ml: 5 }}>
+                                    Version {opencodeStatus.version}
+                                </Typography>
+                            )}
+                        </Box>
+                    </Box>
+                </Paper>
+            </Box>
+        </Box>
     );
 }
 

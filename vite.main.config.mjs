@@ -35,6 +35,7 @@ const createObfuscationPlugin = (mode) =>
 export default defineConfig(({ mode }) => ({
     plugins: [createObfuscationPlugin(mode)].filter(Boolean),
     build: {
+        codeSplitting: false,
         rollupOptions: {
             external: ['@homebridge/node-pty-prebuilt-multiarch'],
         },

@@ -8,13 +8,115 @@ import '@xterm/xterm/css/xterm.css';
 const INLINE_COMPLETION_URL = 'http://127.0.0.1:1234/v1/completions';
 const runtime = window.palRuntime;
 
+const TEXT_FILE_EXTENSIONS = new Set([
+    '.txt', '.md', '.markdown', '.rst', '.adoc', '.org', '.log', '.cfg', '.ini', '.toml', '.yaml', '.yml', '.json', '.jsonc', '.xml', '.html', '.htm', '.csv', '.tsv', '.gitattributes', '.gitignore', '.editorconfig', '.npmrc', '.env', '.env.local', '.env.development', '.env.production', '.env.test', '.license', '.licence', '.readme', '.mdx',
+]);
+
+const TEXT_AUTOCOMPLETE_SYSTEM_PROMPT =
+    'SYSTEM: You are a fast, low-latency sentence completer for an IDE\'s non-code files. Given the preceding context, provide a single concise completion (max 10 words) for the current word or phrase. Do NOT output code snippets or programming paradigms. Maintain a professional, documentation-oriented tone.';
+
+const CODE_AUTOCOMPLETE_SYSTEM_PROMPT =
+    'SYSTEM: You are a fast, low-latency code completer for an IDE. Continue the current code pattern concisely and avoid repeating existing text.';
+
+const normalizeSuggestionPayload = (value, { maxWords = null } = {}) => {
+    const text = String(value || '').replace(/\r/g, '').trim();
+    if (!text) {
+        return '';
+    }
+
+    const withoutFenceArtifacts = text.replace(/```[\s\S]*?```/g, (match) => match.replace(/```/g, ''));
+    const collapsedWhitespace = withoutFenceArtifacts.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+
+    const lines = collapsedWhitespace.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) {
+        return '';
+    }
+
+    const dedupedLines = [];
+    for (const line of lines) {
+        if (dedupedLines[dedupedLines.length - 1] !== line) {
+            dedupedLines.push(line);
+        }
+    }
+
+    let suggestion = dedupedLines.join('\n').trim();
+    const repeatedBlockMatch = suggestion.match(/^(\S[\s\S]*?)\n\1(?:\n\1)+$/);
+    if (repeatedBlockMatch) {
+        suggestion = repeatedBlockMatch[1].trim();
+    }
+
+    if (maxWords) {
+        suggestion = suggestion.split(/\s+/).filter(Boolean).slice(0, maxWords).join(' ').trim();
+    }
+
+    return suggestion;
+};
+
+const getActiveFileTypeInfo = (filePath) => {
+    const rawPath = String(filePath || '').trim();
+    if (!rawPath) {
+        return { extension: '', isTextLike: true };
+    }
+
+    const normalizedPath = rawPath.replace(/\\/g, '/');
+    const fileName = normalizedPath.split('/').pop() || normalizedPath;
+    const lowerName = fileName.toLowerCase();
+
+    if (lowerName.startsWith('.') && !lowerName.slice(1).includes('.')) {
+        return { extension: lowerName, isTextLike: true };
+    }
+
+    const lastDotIndex = lowerName.lastIndexOf('.');
+    const extension = lastDotIndex >= 0 ? lowerName.slice(lastDotIndex) : '';
+    if (!extension) {
+        return { extension: '', isTextLike: true };
+    }
+
+    return {
+        extension,
+        isTextLike: TEXT_FILE_EXTENSIONS.has(extension),
+    };
+};
+
+const buildAutocompletePrompt = ({ beforeCursor, afterCursor, isTextLike }) => {
+    if (isTextLike) {
+        return [
+            TEXT_AUTOCOMPLETE_SYSTEM_PROMPT,
+            'Complete the current text naturally and briefly.',
+            `PREFIX:\n${beforeCursor}`,
+            `SUFFIX:\n${afterCursor}`,
+            'RESPONSE:',
+        ].join('\n\n');
+    }
+
+    return `<|fim_prefix|>${beforeCursor}<|fim_suffix|>${afterCursor}<|fim_middle|>`;
+};
+
+const resolveAutocompleteModel = (settings, isTextLike) => {
+    const codingModel = String(settings?.roleMappings?.coding || '').trim();
+    const autocompleteModel = String(settings?.roleMappings?.autocomplete || '').trim();
+
+    if (isTextLike) {
+        return autocompleteModel || '';
+    }
+
+    return codingModel || autocompleteModel || '';
+};
+
 function EditorPanel({
     code,
     onChangeCode,
     activeFilePath = 'untitled.py',
+    openTabs = [],
+    activeTabId = '',
+    onActivateTab,
+    onCloseTab,
+    onPinPreviewTab,
+    onSaveActiveTab,
     onModelMetricsUpdate,
     terminalHeightRatio = 0.27,
     onTerminalHeightRatioChange,
+    terminalVisible = true,
 }) {
     const terminalWrapRef = useRef(null);
     const terminalContainerMapRef = useRef({});
@@ -27,6 +129,8 @@ function EditorPanel({
     const inlineRequestCounterRef = useRef(0);
     const inlineTimerRef = useRef(null);
     const inlineDisposablesRef = useRef([]);
+    const aiSettingsRef = useRef(null);
+    const onSaveActiveTabRef = useRef(onSaveActiveTab);
     const [terminals, setTerminals] = useState([{ id: 'terminal-1', title: 'Terminal 1' }]);
     const [activeTerminalId, setActiveTerminalId] = useState('terminal-1');
     const activeTerminalIdRef = useRef('terminal-1');
@@ -61,6 +165,8 @@ function EditorPanel({
                 const offset = model.getOffsetAt(position);
                 const beforeCursor = wholeText.slice(0, offset);
                 const afterCursor = wholeText.slice(offset);
+                const fileTypeInfo = getActiveFileTypeInfo(activeFilePath);
+                const selectedModel = resolveAutocompleteModel(aiSettingsRef.current, fileTypeInfo.isTextLike);
 
                 if (beforeCursor.trim().length < 3) {
                     inlineSuggestionRef.current = { text: '', lineNumber: position.lineNumber, column: position.column };
@@ -72,18 +178,31 @@ function EditorPanel({
 
                 const startedAt = performance.now();
                 try {
-                    const prompt = `<|fim_prefix|>${beforeCursor}<|fim_suffix|>${afterCursor}<|fim_middle|>`;
+                    const prompt = buildAutocompletePrompt({
+                        beforeCursor,
+                        afterCursor,
+                        isTextLike: fileTypeInfo.isTextLike,
+                    });
+
+                    const requestBody = {
+                        prompt,
+                        max_tokens: fileTypeInfo.isTextLike ? 10 : 64,
+                        temperature: fileTypeInfo.isTextLike ? 0.1 : 0.2,
+                        stop: fileTypeInfo.isTextLike
+                            ? ['\n\n', '```']
+                            : ['<|fim_prefix|>', '<|fim_suffix|>', '<|fim_middle|>'],
+                    };
+
+                    if (selectedModel) {
+                        requestBody.model = selectedModel;
+                    }
+
                     const response = await fetch(INLINE_COMPLETION_URL, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({
-                            prompt,
-                            max_tokens: 64,
-                            temperature: 0.2,
-                            stop: ['<|fim_prefix|>', '<|fim_suffix|>', '<|fim_middle|>'],
-                        }),
+                        body: JSON.stringify(requestBody),
                     });
 
                     if (!response.ok) {
@@ -91,10 +210,10 @@ function EditorPanel({
                     }
 
                     const payload = await response.json();
-                    let suggestion = String(payload?.choices?.[0]?.text || '');
-                    suggestion = suggestion
-                        .replace(/<\|fim_(prefix|suffix|middle)\|>/g, '')
-                        .replace(/\r/g, '');
+                    let suggestion = String(payload?.choices?.[0]?.text || payload?.choices?.[0]?.message?.content || '');
+                    suggestion = normalizeSuggestionPayload(suggestion, {
+                        maxWords: fileTypeInfo.isTextLike ? 10 : null,
+                    });
 
                     if (inlineRequestCounterRef.current !== requestId) {
                         return;
@@ -192,7 +311,15 @@ function EditorPanel({
                 editor.trigger('keyboard', 'editor.action.inlineSuggest.commit', {});
             },
         });
+
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
+            await onSaveActiveTabRef.current?.();
+        });
     };
+
+    useEffect(() => {
+        onSaveActiveTabRef.current = onSaveActiveTab;
+    }, [onSaveActiveTab]);
 
     useEffect(() => {
         return () => {
@@ -203,6 +330,28 @@ function EditorPanel({
     useEffect(() => {
         activeTerminalIdRef.current = activeTerminalId;
     }, [activeTerminalId]);
+
+    useEffect(() => {
+        let mounted = true;
+
+        const hydrateAutocompleteSettings = async () => {
+            try {
+                const settings = await runtime?.getAiAssistantSettings?.();
+                if (mounted) {
+                    aiSettingsRef.current = settings || null;
+                }
+            } catch {
+                if (mounted) {
+                    aiSettingsRef.current = null;
+                }
+            }
+        };
+
+        void hydrateAutocompleteSettings();
+        return () => {
+            mounted = false;
+        };
+    }, []);
 
     const fitAndSyncTerminal = (terminalId) => {
         const fitAddon = fitAddonMapRef.current[terminalId];
@@ -422,143 +571,215 @@ function EditorPanel({
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[#0f1319]">
-            <div className="flex h-8 items-center justify-between border-b border-slate-800 px-3">
-                <div className="flex items-center gap-2 text-cyan-100">
-                    <Code2 className="h-4 w-4" />
-                    <h2 className="text-xs font-semibold tracking-[0.08em]">Workspace Editor</h2>
-                </div>
-                <div className="max-w-[65%] truncate text-xs text-slate-400" title={activeFilePath}>
-                    {activeFilePath}
+            <div className="flex h-9 items-center border-b border-slate-800 bg-slate-950/70 px-1">
+                {openTabs.length ? (
+                    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                        {openTabs.map((tab) => {
+                            const active = tab.id === activeTabId;
+                            return (
+                                <button
+                                    key={tab.id}
+                                    type="button"
+                                    onClick={() => onActivateTab?.(tab.id)}
+                                    className={`group inline-flex h-7 max-w-[280px] items-center gap-2 rounded-md border px-2 text-xs ${active
+                                        ? 'border-cyan-300/40 bg-cyan-300/12 text-cyan-100'
+                                        : 'border-slate-700/70 bg-slate-900/70 text-slate-300 hover:text-slate-100'
+                                        }`}
+                                    title={tab.path}
+                                    onDoubleClick={() => {
+                                        if (tab.isPreview) {
+                                            onPinPreviewTab?.(tab.id);
+                                        }
+                                    }}
+                                >
+                                    <Code2 className="h-3.5 w-3.5 shrink-0" />
+                                    <span className={`truncate ${tab.isPreview ? 'italic text-slate-200' : ''}`}>
+                                        {tab.title}
+                                    </span>
+                                    {tab.isDirty && (
+                                        <span className="h-2 w-2 rounded-full bg-amber-300" title="Unsaved changes" />
+                                    )}
+                                    {tab.isPreview && (
+                                        <span className="rounded border border-slate-600/80 px-1 py-0 text-[10px] uppercase tracking-[0.08em] text-slate-400">
+                                            Preview
+                                        </span>
+                                    )}
+                                    <span
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            onCloseTab?.(tab.id);
+                                        }}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter' || event.key === ' ') {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                onCloseTab?.(tab.id);
+                                            }
+                                        }}
+                                        className="rounded p-0.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <div className="flex items-center gap-2 px-2 text-xs font-semibold uppercase tracking-[0.08em] text-slate-400">
+                        <Code2 className="h-4 w-4" />
+                        No open editors
+                    </div>
+                )}
+
+                <div className="ml-2 max-w-[35%] truncate pr-2 text-[11px] text-slate-500" title={activeFilePath}>
+                    {activeFilePath || 'Welcome'}
                 </div>
             </div>
 
             <div className="flex min-h-0 flex-1 flex-col">
                 <div className="min-h-0 flex-1 overflow-hidden border-b border-edge">
-                    <Editor
-                        height="100%"
-                        defaultLanguage="python"
-                        theme="vs-dark"
-                        value={code}
-                        onMount={(editor, monaco) => {
-                            editorRef.current = editor;
-                            monacoRef.current = monaco;
-                            disposeInlineCompletions();
-                            registerInlineCompletions(editor, monaco);
-                        }}
-                        onChange={(value) => onChangeCode(value ?? '')}
-                        options={{
-                            minimap: { enabled: false },
-                            smoothScrolling: true,
-                            fontSize: 14,
-                            tabSize: 2,
-                            roundedSelection: true,
-                            scrollBeyondLastLine: false,
-                            automaticLayout: true,
-                            padding: { top: 16 },
-                        }}
-                    />
-                </div>
-
-                <div
-                    onMouseDown={(event) => {
-                        event.preventDefault();
-
-                        const container = terminalWrapRef.current?.parentElement;
-                        if (!container) {
-                            return;
-                        }
-
-                        const totalHeight = container.clientHeight || 1;
-                        const startY = event.clientY;
-                        const startRatio = terminalHeightRatio;
-
-                        const onMove = (moveEvent) => {
-                            const deltaRatio = (moveEvent.clientY - startY) / totalHeight;
-                            const nextRatio = Math.max(0.16, Math.min(0.45, startRatio - deltaRatio));
-                            onTerminalHeightRatioChange?.(nextRatio);
-                        };
-
-                        const onUp = () => {
-                            window.removeEventListener('mousemove', onMove);
-                            window.removeEventListener('mouseup', onUp);
-                        };
-
-                        window.addEventListener('mousemove', onMove);
-                        window.addEventListener('mouseup', onUp);
-                    }}
-                    className="h-1 cursor-row-resize bg-transparent transition hover:bg-cyan-300/25"
-                    title="Resize terminal"
-                />
-
-                <div ref={terminalWrapRef} className="min-h-[170px] bg-[#0a0f16]" style={{ height: `${Math.round(terminalHeightRatio * 100)}%` }}>
-                    <div className="flex h-8 items-center justify-between gap-2 border-b border-slate-800 px-2 text-[11px] text-slate-400">
-                        <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
-                            <span className="inline-flex items-center gap-1 px-2 uppercase tracking-[0.08em] text-cyan-300">
-                                <TerminalSquare className="h-3.5 w-3.5" />
-                                Terminal
-                            </span>
-                            {terminals.map((terminal) => {
-                                const active = terminal.id === activeTerminalId;
-                                return (
-                                    <button
-                                        key={terminal.id}
-                                        type="button"
-                                        onClick={() => setActiveTerminalId(terminal.id)}
-                                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${active
-                                            ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
-                                            : 'border-slate-700/80 bg-slate-900/70 text-slate-300'
-                                            }`}
-                                    >
-                                        {terminal.title}
-                                        {terminals.length > 1 && (
-                                            <span
-                                                role="button"
-                                                tabIndex={0}
-                                                onClick={(event) => {
-                                                    event.stopPropagation();
-                                                    closeTerminal(terminal.id);
-                                                }}
-                                                onKeyDown={(event) => {
-                                                    if (event.key === 'Enter' || event.key === ' ') {
-                                                        event.preventDefault();
-                                                        event.stopPropagation();
-                                                        closeTerminal(terminal.id);
-                                                    }
-                                                }}
-                                                className="rounded p-0.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                                            >
-                                                <X className="h-3 w-3" />
-                                            </span>
-                                        )}
-                                    </button>
-                                );
-                            })}
+                    {openTabs.length ? (
+                        <Editor
+                            height="100%"
+                            defaultLanguage="python"
+                            theme="vs-dark"
+                            value={code}
+                            onMount={(editor, monaco) => {
+                                editorRef.current = editor;
+                                monacoRef.current = monaco;
+                                disposeInlineCompletions();
+                                registerInlineCompletions(editor, monaco);
+                            }}
+                            onChange={(value) => onChangeCode(value ?? '')}
+                            options={{
+                                minimap: { enabled: false },
+                                smoothScrolling: true,
+                                fontSize: 14,
+                                tabSize: 2,
+                                readOnly: false,
+                                roundedSelection: true,
+                                scrollBeyondLastLine: false,
+                                automaticLayout: true,
+                                padding: { top: 16 },
+                            }}
+                        />
+                    ) : (
+                        <div className="flex h-full items-center justify-center bg-[#0f1319] p-6">
+                            <div className="w-full max-w-xl rounded-xl border border-slate-800 bg-slate-900/60 p-6">
+                                <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.1em] text-cyan-100">Welcome to PAL IDE</h3>
+                                <p className="mb-2 text-sm text-slate-300">Select a file from Explorer to preview it.</p>
+                                <p className="text-sm text-slate-400">Double-click a file to open it and keep it as a pinned tab.</p>
+                            </div>
                         </div>
-                        <button
-                            type="button"
-                            onClick={createTerminal}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900/70 px-2 py-0.5 text-[11px] text-slate-300 hover:text-cyan-100"
-                            title="New terminal"
-                        >
-                            <Plus className="h-3 w-3" /> New
-                        </button>
-                    </div>
-                    <div className="h-[calc(100%-32px)] w-full px-1 py-1">
-                        {terminals.map((terminal) => (
-                            <div
-                                key={terminal.id}
-                                ref={(element) => {
-                                    if (element) {
-                                        terminalContainerMapRef.current[terminal.id] = element;
-                                    } else {
-                                        delete terminalContainerMapRef.current[terminal.id];
-                                    }
-                                }}
-                                className={`h-full w-full ${terminal.id === activeTerminalId ? 'block' : 'hidden'}`}
-                            />
-                        ))}
-                    </div>
+                    )}
                 </div>
+
+                {terminalVisible && (
+                    <>
+                        <div
+                            onMouseDown={(event) => {
+                                event.preventDefault();
+
+                                const container = terminalWrapRef.current?.parentElement;
+                                if (!container) {
+                                    return;
+                                }
+
+                                const totalHeight = container.clientHeight || 1;
+                                const startY = event.clientY;
+                                const startRatio = terminalHeightRatio;
+
+                                const onMove = (moveEvent) => {
+                                    const deltaRatio = (moveEvent.clientY - startY) / totalHeight;
+                                    const nextRatio = Math.max(0.16, Math.min(0.45, startRatio - deltaRatio));
+                                    onTerminalHeightRatioChange?.(nextRatio);
+                                };
+
+                                const onUp = () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                };
+
+                                window.addEventListener('mousemove', onMove);
+                                window.addEventListener('mouseup', onUp);
+                            }}
+                            className="h-1 cursor-row-resize bg-transparent transition hover:bg-cyan-300/25"
+                            title="Resize terminal"
+                        />
+
+                        <div ref={terminalWrapRef} className="min-h-[170px] bg-[#0a0f16]" style={{ height: `${Math.round(terminalHeightRatio * 100)}%` }}>
+                            <div className="flex h-8 items-center justify-between gap-2 border-b border-slate-800 px-2 text-[11px] text-slate-400">
+                                <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
+                                    <span className="inline-flex items-center gap-1 px-2 uppercase tracking-[0.08em] text-cyan-300">
+                                        <TerminalSquare className="h-3.5 w-3.5" />
+                                        Terminal
+                                    </span>
+                                    {terminals.map((terminal) => {
+                                        const active = terminal.id === activeTerminalId;
+                                        return (
+                                            <button
+                                                key={terminal.id}
+                                                type="button"
+                                                onClick={() => setActiveTerminalId(terminal.id)}
+                                                className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${active
+                                                    ? 'border-cyan-300/40 bg-cyan-300/15 text-cyan-100'
+                                                    : 'border-slate-700/80 bg-slate-900/70 text-slate-300'
+                                                    }`}
+                                            >
+                                                {terminal.title}
+                                                {terminals.length > 1 && (
+                                                    <span
+                                                        role="button"
+                                                        tabIndex={0}
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            closeTerminal(terminal.id);
+                                                        }}
+                                                        onKeyDown={(event) => {
+                                                            if (event.key === 'Enter' || event.key === ' ') {
+                                                                event.preventDefault();
+                                                                event.stopPropagation();
+                                                                closeTerminal(terminal.id);
+                                                            }
+                                                        }}
+                                                        className="rounded p-0.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                                                    >
+                                                        <X className="h-3 w-3" />
+                                                    </span>
+                                                )}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={createTerminal}
+                                    className="inline-flex items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900/70 px-2 py-0.5 text-[11px] text-slate-300 hover:text-cyan-100"
+                                    title="New terminal"
+                                >
+                                    <Plus className="h-3 w-3" /> New
+                                </button>
+                            </div>
+                            <div className="h-[calc(100%-32px)] w-full px-1 py-1">
+                                {terminals.map((terminal) => (
+                                    <div
+                                        key={terminal.id}
+                                        ref={(element) => {
+                                            if (element) {
+                                                terminalContainerMapRef.current[terminal.id] = element;
+                                            } else {
+                                                delete terminalContainerMapRef.current[terminal.id];
+                                            }
+                                        }}
+                                        className={`h-full w-full ${terminal.id === activeTerminalId ? 'block' : 'hidden'}`}
+                                    />
+                                ))}
+                            </div>
+                        </div>
+                    </>
+                )}
             </div>
         </div>
     );

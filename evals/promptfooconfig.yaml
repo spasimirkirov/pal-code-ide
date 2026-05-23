@@ -1,0 +1,36 @@
+description: PAL agentic behavior regression checks
+prompts:
+  - "{{prompt}}"
+providers:
+  # Configure this provider for your environment before running evals.
+  # Example:
+  # - id: openai:responses:gpt-4.1-mini
+  #   config:
+  #     apiKey: env:OPENAI_API_KEY
+  - id: openai:responses:gpt-4.1-mini
+    config:
+      apiKey: env:OPENAI_API_KEY
+defaultTest:
+  options:
+    rubricPrompt: |
+      You are grading if the assistant behaves as a coding agent.
+      Pass only if it explicitly chooses concrete implementation actions over analysis-only stalling.
+
+tests:
+  - vars:
+      prompt: "Implement a concrete UI change in an existing file. Do not just analyze."
+    assert:
+      - type: llm-rubric
+        value: "The answer commits to implementation actions and does not stop at read-only analysis."
+
+  - vars:
+      prompt: "If a file path is slightly wrong, recover using likely path suggestions and continue."
+    assert:
+      - type: llm-rubric
+        value: "The answer demonstrates resilient path recovery and continuation behavior."
+
+  - vars:
+      prompt: "For coding tasks, complete with concrete code changes and a concise summary."
+    assert:
+      - type: llm-rubric
+        value: "The answer prioritizes coding outcomes and includes change completion language."

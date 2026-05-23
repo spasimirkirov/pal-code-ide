@@ -1,8 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import simpleGit from 'simple-git';
-
-const IGNORED_NAMES = new Set(['.git', 'node_modules', '.vite', 'dist', 'out']);
+import { WORKSPACE_IGNORED_NAMES } from '../shared/workspace-constants';
 
 const sortEntries = (entries) =>
     [...entries].sort((a, b) => {
@@ -26,8 +25,13 @@ const normalizeInsideRoot = (rootPath, targetPath) => {
 };
 
 export const createProjectService = ({ getWorkspaceRoot }) => {
+    const safeStat = (p) => {
+        try { return fs.statSync(p); } catch { return null; }
+    };
+
     const buildTreeNode = (absolutePath, rootPath) => {
-        const stat = fs.statSync(absolutePath);
+        const stat = safeStat(absolutePath);
+        if (!stat) return null;
         const relative = path.relative(rootPath, absolutePath) || '.';
         const node = {
             id: relative,
@@ -38,13 +42,20 @@ export const createProjectService = ({ getWorkspaceRoot }) => {
         };
 
         if (stat.isDirectory()) {
-            const entries = fs
-                .readdirSync(absolutePath, { withFileTypes: true })
-                .filter((entry) => !IGNORED_NAMES.has(entry.name));
+            try {
+                const entries = fs
+                    .readdirSync(absolutePath, { withFileTypes: true })
+                    .filter((entry) => !WORKSPACE_IGNORED_NAMES.has(entry.name));
 
-            node.children = sortEntries(entries).map((entry) =>
-                buildTreeNode(path.join(absolutePath, entry.name), rootPath),
-            );
+                node.children = sortEntries(entries).flatMap((entry) => {
+                    let childPath;
+                    try { childPath = path.join(absolutePath, entry.name); } catch { return []; }
+                    const child = buildTreeNode(childPath, rootPath);
+                    return child ? [child] : [];
+                });
+            } catch {
+                node.children = [];
+            }
         }
 
         return node;
@@ -77,6 +88,36 @@ export const createProjectService = ({ getWorkspaceRoot }) => {
         };
     };
 
+    const parseNumstat = (raw, root) => {
+        const map = {};
+        if (!raw) return map;
+        for (const line of raw.split('\n')) {
+            const parts = line.trim().split('\t');
+            if (parts.length < 3) continue;
+            const [add, del, ...nameParts] = parts;
+            const filePath = nameParts.join('\t');
+            if (!filePath) continue;
+            const absPath = path.join(root, filePath);
+            const isBinary = add === '-' && del === '-';
+            map[filePath] = {
+                additions: isBinary ? 0 : Math.max(0, parseInt(add, 10) || 0),
+                deletions: isBinary ? 0 : Math.max(0, parseInt(del, 10) || 0),
+                isBinary,
+            };
+        }
+        return map;
+    };
+
+    const countFileLines = (absolutePath) => {
+        try {
+            const content = fs.readFileSync(absolutePath, 'utf-8');
+            if (!content) return 0;
+            return content.split('\n').length;
+        } catch {
+            return 0;
+        }
+    };
+
     const getGitStatus = async () => {
         const root = getWorkspaceRoot();
         const git = simpleGit(root);
@@ -92,23 +133,41 @@ export const createProjectService = ({ getWorkspaceRoot }) => {
         }
 
         const status = await git.status();
+        const [stagedNumstatRaw, unstagedNumstatRaw] = await Promise.all([
+            git.raw(['diff', '--cached', '--numstat']).catch(() => ''),
+            git.raw(['diff', '--numstat']).catch(() => ''),
+        ]);
+        const stagedNumstat = parseNumstat(stagedNumstatRaw, root);
+        const unstagedNumstat = parseNumstat(unstagedNumstatRaw, root);
+
         const staged = [];
         const unstaged = [];
 
         for (const file of status.files) {
             const label = file.path;
             if (file.index && file.index !== ' ') {
+                const stats = stagedNumstat[label] || {};
                 staged.push({
                     path: label,
                     index: file.index,
                     workingDir: file.working_dir,
+                    additions: stats.additions ?? 0,
+                    deletions: stats.deletions ?? 0,
+                    isBinary: stats.isBinary ?? false,
                 });
             }
             if (file.working_dir && file.working_dir !== ' ') {
+                const isUntracked = file.working_dir === '?';
+                const stats = isUntracked
+                    ? { additions: countFileLines(path.join(root, label)), deletions: 0, isBinary: false }
+                    : (unstagedNumstat[label] || {});
                 unstaged.push({
                     path: label,
                     index: file.index,
                     workingDir: file.working_dir,
+                    additions: stats.additions ?? 0,
+                    deletions: stats.deletions ?? 0,
+                    isBinary: stats.isBinary ?? false,
                 });
             }
         }
@@ -184,11 +243,52 @@ export const createProjectService = ({ getWorkspaceRoot }) => {
 
         const root = getWorkspaceRoot();
         const git = simpleGit(root);
-        await git.checkout([target]);
+
+        try {
+            await git.checkout([target]);
+        } catch {
+            const absPath = path.join(root, target);
+            if (fs.existsSync(absPath)) {
+                fs.rmSync(absPath, { force: true });
+            } else {
+                throw new Error(`Cannot revert ${target}: not tracked by git and not found on disk.`);
+            }
+        }
 
         return {
             reverted: true,
             filePath: target,
+        };
+    };
+
+    const stageAll = async () => {
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+        await git.add(['-A']);
+
+        return {
+            stagedAll: true,
+        };
+    };
+
+    const unstageAll = async () => {
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+        await git.reset(['HEAD']);
+
+        return {
+            unstagedAll: true,
+        };
+    };
+
+    const revertAll = async () => {
+        const root = getWorkspaceRoot();
+        const git = simpleGit(root);
+        await git.checkout(['.']);
+        await git.raw(['clean', '-fd']).catch(() => {});
+
+        return {
+            revertedAll: true,
         };
     };
 
@@ -229,6 +329,9 @@ export const createProjectService = ({ getWorkspaceRoot }) => {
         stageFile,
         unstageFile,
         revertFile,
+        stageAll,
+        unstageAll,
+        revertAll,
         getDiffContent,
     };
 };

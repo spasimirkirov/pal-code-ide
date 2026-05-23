@@ -1,0 +1,20 @@
+diff --git a/node_modules/@electron-forge/plugin-vite/dist/config/vite.preload.config.js b/node_modules/@electron-forge/plugin-vite/dist/config/vite.preload.config.js
+index 09fd751..f584faf 100644
+--- a/node_modules/@electron-forge/plugin-vite/dist/config/vite.preload.config.js
++++ b/node_modules/@electron-forge/plugin-vite/dist/config/vite.preload.config.js
+@@ -8,14 +8,13 @@ function getConfig(forgeEnv, userConfig = {}) {
+     const config = {
+         build: {
+             copyPublicDir: false,
++            codeSplitting: false,
+             rollupOptions: {
+                 external: [...vite_base_config_1.external, 'electron/renderer'],
+                 // Preload scripts may contain Web assets, so use the `build.rollupOptions.input` instead `build.lib.entry`.
+                 input: forgeConfigSelf.entry,
+                 output: {
+                     format: 'cjs',
+-                    // It should not be split chunks.
+-                    inlineDynamicImports: true,
+                     entryFileNames: '[name].js',
+                     chunkFileNames: '[name].js',
+                     assetFileNames: '[name].[ext]',

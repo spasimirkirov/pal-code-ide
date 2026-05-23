@@ -36,4 +36,8 @@ const createObfuscationPlugin = (mode) =>
 
 export default defineConfig(({ mode }) => ({
     plugins: [react(), createObfuscationPlugin(mode)].filter(Boolean),
+    server: {
+        port: 5181,
+        strictPort: false,
+    },
 }));
