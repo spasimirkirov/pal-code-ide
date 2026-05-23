@@ -46,6 +46,7 @@ export const WORKSPACE_TOOLING_PROMPT = [
     'Use web-search for external docs or unknown APIs instead of asking the user to provide links.',
     'Terminal commands are sensitive: propose terminal-command but wait for explicit user approval before execution.',
     'Never include absolute paths.',
+    'When exploring files, skip binary files (images, audio, video, archives, PDFs, etc.) — they cannot be read. Do not retry reading them.',
     '',
     '=== Project Context Layer (call project_get_metadata first to understand the project) ===',
     'project_get_metadata: Returns parsed project metadata — framework (React/Vue/Vanilla), bundler (Vite/Webpack), Electron version, build scripts, dependencies, config file content (forge.config, vite.config). Use this to understand the project ecosystem before making changes.',

@@ -80,11 +80,11 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
 
         if (isBinaryExtension(absPath)) {
             const ext = path.extname(absPath).toLowerCase();
-            throw new Error(`Cannot read "${path.basename(absPath)}": binary files (.${ext.slice(1)}) are not supported. Skip this file and inform the user.`);
+            throw new Error(`Cannot read "${path.basename(absPath)}": binary files (.${ext.slice(1)}) are not supported. Skip it and continue with text files. Do not retry.`);
         }
 
         if (isBinaryContent(absPath)) {
-            throw new Error(`Cannot read "${path.basename(absPath)}": file appears to be binary. Only text files can be read.`);
+            throw new Error(`Cannot read "${path.basename(absPath)}": file appears to be binary. Skip it and continue with text files. Do not retry.`);
         }
 
         return { path: absPath, content: fs.readFileSync(absPath, 'utf-8') };
@@ -190,7 +190,7 @@ export const createAiOrchestratorService = ({ getMainWindow, getWorkspaceRoot, w
 
         // Block binary files early with a clear message
         if (actionType !== 'delete-file' && isBinaryExtension(rawPath)) {
-            return { ok: false, error: `Cannot read "${path.basename(rawPath)}": binary files (.${path.extname(rawPath).toLowerCase().slice(1)}) are not supported. Only text files can be read.` };
+            return { ok: false, error: `Cannot read "${path.basename(rawPath)}": binary files (.${path.extname(rawPath).toLowerCase().slice(1)}) are not supported. Skip it and continue with text files. Do not retry.` };
         }
 
         let exists = false;
