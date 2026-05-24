@@ -3,10 +3,16 @@ import { Box, Typography, Chip, Menu, MenuItem, Select, Tooltip } from '@mui/mat
 
 const MODE_LABELS = { all: 'All', safe: 'Safe', manual: 'Manual' };
 const MODE_COLORS = { all: 'success', safe: 'warning', manual: 'error' };
+const TERMINAL_STATE_COLORS = {
+    running: '#4ade80',
+    starting: '#fbbf24',
+    idle: '#94a3b8',
+    closed: '#64748b',
+};
 
 const runtime = window.palRuntime;
 
-function StatusBar({ hardware, modelPerf, autoApprovalMode, onAutoApprovalModeChange, onRefreshSettings }) {
+function StatusBar({ hardware, modelPerf, terminalState, autoApprovalMode, onAutoApprovalModeChange, onRefreshSettings }) {
     const [models, setModels] = useState([]);
     const [modelsLoading, setModelsLoading] = useState(false);
     const [activeModel, setActiveModel] = useState('');
@@ -60,6 +66,10 @@ function StatusBar({ hardware, modelPerf, autoApprovalMode, onAutoApprovalModeCh
 
     const formatTokens = (v) => (v && v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v || 0}`);
     const vramPercent = hardware.vramTotal > 0 ? Math.max(0, Math.min(100, (hardware.vramUsed / hardware.vramTotal) * 100)) : 0;
+    const activeTerminalStatus = String(terminalState?.activeStatus || 'idle');
+    const runningTerminals = Number(terminalState?.running || 0);
+    const totalTerminals = Math.max(1, Number(terminalState?.total || 1));
+    const safeModelValue = models.some((model) => model.id === activeModel) ? activeModel : '';
 
     return (
         <Box
@@ -83,13 +93,27 @@ function StatusBar({ hardware, modelPerf, autoApprovalMode, onAutoApprovalModeCh
                 <Typography variant="caption" sx={{ fontSize: '0.6rem', color: 'text.disabled' }}>
                     {modelPerf.tokensPerSec.toFixed(1)} t/s &middot; {formatTokens(modelPerf.contextUsed)}/{formatTokens(modelPerf.contextTotal)}
                 </Typography>
+
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                    <Box
+                        sx={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: '50%',
+                            bgcolor: TERMINAL_STATE_COLORS[activeTerminalStatus] || TERMINAL_STATE_COLORS.idle,
+                        }}
+                    />
+                    <Typography variant="caption" sx={{ fontSize: '0.6rem', color: 'text.disabled' }}>
+                        term {runningTerminals}/{totalTerminals} {activeTerminalStatus}
+                    </Typography>
+                </Box>
             </Box>
 
             {/* Right: Model selector + auto-approval */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <Select
                     size="small"
-                    value={activeModel}
+                    value={safeModelValue}
                     displayEmpty
                     disabled={modelsLoading || loadingModel}
                     onChange={(e) => void handleModelChange(e.target.value)}

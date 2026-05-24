@@ -1,18 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import {
     Box, Typography, TextField, Select, MenuItem, IconButton,
-    Alert, CircularProgress, Tooltip, Chip, Switch, FormControlLabel,
+    Alert, CircularProgress, Tooltip,
     Paper,
 } from '@mui/material';
-import { RefreshCw, Sparkles, Bot, Server, Cpu, Cog } from 'lucide-react';
+import { RefreshCw, Sparkles, Server, Cpu, Cog } from 'lucide-react';
 
 const runtime = window.palRuntime;
 
 const defaultSettings = {
     engine: 'lm-studio',
-    agentType: 'built-in',
     lmStudio: { endpointUrl: 'http://localhost:1234', port: '1234', activeModel: '' },
-    aider: { autoCommits: false, autoLint: true, mapTokens: 1024 },
 };
 
 function AiAssistantPanel() {
@@ -21,8 +19,9 @@ function AiAssistantPanel() {
     const [lmStudioLoading, setLmStudioLoading] = useState(false);
     const [lmStudioError, setLmStudioError] = useState('');
     const [lmStudioReachable, setLmStudioReachable] = useState(true);
-    const [aiderStatus, setAiderStatus] = useState(null);
-    const [aiderLoading, setAiderLoading] = useState(false);
+    const safeActiveModel = lmStudioModels.some((model) => model.id === settings.lmStudio.activeModel)
+        ? settings.lmStudio.activeModel
+        : '';
 
     const hydrate = async () => {
         try {
@@ -57,18 +56,8 @@ function AiAssistantPanel() {
         } finally { setLmStudioLoading(false); }
     };
 
-    const checkAider = async () => {
-        setAiderLoading(true);
-        try {
-            const result = await runtime?.aiderCheck?.();
-            setAiderStatus(result || { available: false, error: 'No response' });
-        } catch { setAiderStatus({ available: false, error: 'Failed to check Aider' }); }
-        finally { setAiderLoading(false); }
-    };
-
     useEffect(() => {
         void refreshLmStudioModels();
-        void checkAider();
     }, []);
 
     return (
@@ -152,7 +141,7 @@ function AiAssistantPanel() {
 
                     <Select
                         fullWidth size="small"
-                        value={settings.lmStudio.activeModel}
+                        value={safeActiveModel}
                         disabled={!lmStudioReachable || lmStudioLoading}
                         onChange={(e) => void updateSettings({ lmStudio: { activeModel: e.target.value } })}
                         displayEmpty
@@ -175,86 +164,22 @@ function AiAssistantPanel() {
                 {/* Agent Engine */}
                 <Paper sx={{ p: 3, borderRadius: 2, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider' }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
-                        <Bot size={16} style={{ color: '#2bd1ff' }} />
+                        <Sparkles size={16} style={{ color: '#2bd1ff' }} />
                         <Typography variant="subtitle2" sx={{ color: 'primary.light', fontSize: '0.7rem' }}>Agent Engine</Typography>
                     </Box>
 
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        {/* Built-in */}
-                        <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(43, 209, 255, 0.04)', border: '1px solid', borderColor: 'rgba(43, 209, 255, 0.15)' }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(43, 209, 255, 0.1)' }}>
-                                    <Sparkles size={16} style={{ color: '#2bd1ff' }} />
-                                </Box>
-                                <Box sx={{ flex: 1 }}>
-                                    <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>Built-in Agent</Typography>
-                                    <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
-                                        PAL IDE's native agent with tool orchestration, file editing, and code search
-                                    </Typography>
-                                </Box>
-                                <Chip
-                                    label="Default"
-                                    size="small"
-                                    sx={{ height: 22, fontSize: '0.6rem', bgcolor: 'rgba(43, 209, 255, 0.1)', color: 'primary.light', fontWeight: 600, borderRadius: 1 }}
-                                />
+                    <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(43, 209, 255, 0.04)', border: '1px solid', borderColor: 'rgba(43, 209, 255, 0.15)' }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(43, 209, 255, 0.1)' }}>
+                                <Sparkles size={16} style={{ color: '#2bd1ff' }} />
+                            </Box>
+                            <Box sx={{ flex: 1 }}>
+                                <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>Built-in Agent</Typography>
+                                <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
+                                    SEARCH/REPLACE agent — single LLM call, no tools, no orchestration overhead
+                                </Typography>
                             </Box>
                         </Box>
-
-                        {/* Aider */}
-                        <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(74, 222, 128, 0.04)', border: '1px solid', borderColor: 'divider' }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 1.5, bgcolor: 'rgba(74, 222, 128, 0.1)' }}>
-                                    <Bot size={16} style={{ color: '#4ade80' }} />
-                                </Box>
-                                <Box sx={{ flex: 1 }}>
-                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8125rem' }}>Aider</Typography>
-                                        {aiderStatus && (
-                                            <Chip
-                                                label={aiderStatus.available ? 'Ready' : 'Unavailable'}
-                                                size="small"
-                                                sx={{
-                                                    height: 20, fontSize: '0.55rem', fontWeight: 600, borderRadius: 1,
-                                                    bgcolor: aiderStatus.available ? 'rgba(74, 222, 128, 0.12)' : 'rgba(251, 113, 133, 0.12)',
-                                                    color: aiderStatus.available ? 'success.light' : 'error.light',
-                                                }}
-                                            />
-                                        )}
-                                    </Box>
-                                    <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem', display: 'block' }}>
-                                        External agent via CLI with auto-commit and lint support
-                                    </Typography>
-                                </Box>
-                                <Tooltip title="Check Aider availability">
-                                    <IconButton size="small" onClick={() => void checkAider()} disabled={aiderLoading} sx={{ width: 28, height: 28 }}>
-                                        {aiderLoading ? <CircularProgress size={12} /> : <RefreshCw size={13} />}
-                                    </IconButton>
-                                </Tooltip>
-                            </Box>
-
-                            <FormControlLabel
-                                control={
-                                    <Switch
-                                        size="small"
-                                        checked={settings.agentType === 'aider'}
-                                        onChange={(e) => void updateSettings({ agentType: e.target.checked ? 'aider' : 'built-in' })}
-                                    />
-                                }
-                                label="Use Aider as agent backend"
-                                sx={{ '& .MuiTypography-root': { fontSize: '0.75rem' } }}
-                            />
-
-                            {aiderStatus && !aiderStatus.available && (
-                                <Alert severity="error" sx={{ mt: 1.5, py: 0.5, px: 1.5, fontSize: '0.6875rem', borderRadius: 1.5 }}>
-                                    {aiderStatus.error || 'Aider CLI not found in PATH'}
-                                </Alert>
-                            )}
-                            {aiderStatus?.available && (
-                                <Typography variant="caption" sx={{ color: 'success.light', fontSize: '0.65rem', display: 'block', mt: 0.5, ml: 5 }}>
-                                    Version {aiderStatus.version}
-                                </Typography>
-                            )}
-                    </Box>
                     </Box>
                 </Paper>
             </Box>

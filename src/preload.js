@@ -99,6 +99,11 @@ contextBridge.exposeInMainWorld('palRuntime', {
         ipcRenderer.on('terminal-get-output', handler);
         return () => ipcRenderer.removeListener('terminal-get-output', handler);
     },
+    onTerminalStatus: (listener) => {
+        const handler = (_event, payload) => listener(payload);
+        ipcRenderer.on('terminal:status', handler);
+        return () => ipcRenderer.removeListener('terminal:status', handler);
+    },
     onAppShortcut: (listener) => {
         const handler = (_event, payload) => listener(payload);
         ipcRenderer.on('app:shortcut', handler);
@@ -110,7 +115,6 @@ contextBridge.exposeInMainWorld('palRuntime', {
         return () => ipcRenderer.removeListener('agent:step-update', handler);
     },
 
-    aiderCheck: () => ipcRenderer.invoke('aider:check'),
     terminalExecute: (payload) => ipcRenderer.invoke('mcp:terminalExecute', payload),
     duckduckgoSearch: (payload) => ipcRenderer.invoke('mcp:duckduckgoSearch', payload),
 });
@@ -195,6 +199,7 @@ contextBridge.exposeInMainWorld('projectRuntime', {
     codeSearchSummary: () => ipcRenderer.invoke('codesearch:summary'),
     codeSearchRefresh: () => ipcRenderer.invoke('codesearch:refresh'),
     patchSearchReplace: (payload) => ipcRenderer.invoke('patch:search-replace', payload),
+    patchPreviewPatch: (payload) => ipcRenderer.invoke('patch:preview-patch', payload),
     patchUnifiedDiff: (payload) => ipcRenderer.invoke('patch:unified-diff', payload),
     patchCreateDiff: (payload) => ipcRenderer.invoke('patch:create-diff', payload),
     patchRollback: (payload) => ipcRenderer.invoke('patch:rollback', payload),

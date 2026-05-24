@@ -43,8 +43,15 @@ function App() {
     const [modelPerf, setModelPerf] = useState({
         tokensPerSec: 0, contextUsed: 0, contextTotal: 32000,
     });
-    const [autoApprovalMode, setAutoApprovalMode] = useState(() => localStorage.getItem('pal-chat-auto-approval-mode') || 'all');
+    const [terminalState, setTerminalState] = useState({
+        total: 1,
+        running: 0,
+        activeTerminalId: 'terminal-1',
+        activeStatus: 'idle',
+    });
+    const [autoApprovalMode, setAutoApprovalMode] = useState(() => localStorage.getItem('pal-chat-auto-approval-mode') || 'manual');
     const [settingsRefreshKey, setSettingsRefreshKey] = useState(0);
+    const [chatFocusRequestId, setChatFocusRequestId] = useState(0);
 
     const handleAutoApprovalModeChange = useCallback((mode) => {
         setAutoApprovalMode(mode);
@@ -73,6 +80,17 @@ function App() {
     const [dbConnectionError, setDbConnectionError] = useState('');
     const [dbTabs, setDbTabs] = useState([]);
     const [activeDbTabId, setActiveDbTabId] = useState(null);
+
+    const getTabTitle = useCallback((filePath) => {
+        const rawPath = String(filePath || '').trim();
+        if (!rawPath) {
+            return 'untitled';
+        }
+
+        const normalized = rawPath.replace(/\\/g, '/');
+        const parts = normalized.split('/').filter(Boolean);
+        return parts[parts.length - 1] || normalized;
+    }, []);
 
     const refreshSavedConnections = useCallback(async () => {
         if (!runtime?.dbGetSavedConnections) return;
@@ -273,13 +291,80 @@ function App() {
         setBootstrapState((current) => ({ ...current, visible: false, inProgress: false, canDismiss: true, cancelled: true, label: 'Download cancelled by user.' }));
     };
 
-    const handleFileOpen = ({ path, content }) => {
-        setActiveFilePath(path || 'untitled.py');
-        setEditorCode(content ?? '');
+    const handleFileOpen = ({ path, content, mode }) => {
+        const resolvedPath = String(path || '').trim();
+        const resolvedContent = String(content ?? '');
+        const openMode = mode === 'preview' ? 'preview' : 'open';
+
+        if (!resolvedPath) {
+            return;
+        }
+
         setActiveView('editor');
+        setActiveFilePath(resolvedPath);
+        setEditorCode(resolvedContent);
+
+        setOpenTabs((current) => {
+            const existingPinned = current.find((tab) => !tab.isPreview && tab.path === resolvedPath);
+            if (existingPinned) {
+                setActiveTabId(existingPinned.id);
+                return current.map((tab) => {
+                    if (tab.id !== existingPinned.id) {
+                        return tab;
+                    }
+
+                    return {
+                        ...tab,
+                        content: resolvedContent,
+                    };
+                });
+            }
+
+            if (openMode === 'preview') {
+                const previewTab = {
+                    id: PREVIEW_TAB_ID,
+                    path: resolvedPath,
+                    title: getTabTitle(resolvedPath),
+                    content: resolvedContent,
+                    isDirty: false,
+                    isPreview: true,
+                };
+
+                const withoutPreview = current.filter((tab) => tab.id !== PREVIEW_TAB_ID);
+                setActiveTabId(PREVIEW_TAB_ID);
+                return [...withoutPreview, previewTab];
+            }
+
+            const previewIndex = current.findIndex((tab) => tab.id === PREVIEW_TAB_ID);
+            if (previewIndex >= 0 && current[previewIndex].path === resolvedPath) {
+                const next = [...current];
+                next[previewIndex] = {
+                    ...next[previewIndex],
+                    id: resolvedPath,
+                    title: getTabTitle(resolvedPath),
+                    isPreview: false,
+                    content: resolvedContent,
+                };
+                setActiveTabId(resolvedPath);
+                return next;
+            }
+
+            const nextTab = {
+                id: resolvedPath,
+                path: resolvedPath,
+                title: getTabTitle(resolvedPath),
+                content: resolvedContent,
+                isDirty: false,
+                isPreview: false,
+            };
+            setActiveTabId(nextTab.id);
+            return [...current, nextTab];
+        });
     };
 
-    const handleWorkspacePathDeleted = () => { /* noop */ };
+    const handleWorkspacePathDeleted = () => {
+        setChatFocusRequestId((current) => current + 1);
+    };
 
     const handleOpenDatabaseTable = (tableName) => {
         setActiveTableName(tableName || '');
@@ -295,12 +380,142 @@ function App() {
 
     const handleNewFile = () => {
         const nextId = untitledCounterRef.current++;
-        setOpenTabs((current) => [...current, { id: `untitled-${nextId}`, path: `untitled-${nextId}.py`, content: '', isDirty: false }]);
+        setOpenTabs((current) => [...current, {
+            id: `untitled-${nextId}`,
+            path: `untitled-${nextId}.py`,
+            title: `untitled-${nextId}.py`,
+            content: '',
+            isDirty: false,
+            isPreview: false,
+        }]);
         setActiveTabId(`untitled-${nextId}`);
         setActiveFilePath(`untitled-${nextId}.py`);
         setEditorCode('');
         setActiveView('editor');
     };
+
+    const handleActivateTab = useCallback((tabId) => {
+        const nextId = String(tabId || '').trim();
+        if (!nextId) {
+            return;
+        }
+
+        setActiveTabId(nextId);
+        setActiveView('editor');
+    }, []);
+
+    const handlePinPreviewTab = useCallback((tabId) => {
+        if (tabId !== PREVIEW_TAB_ID) {
+            return;
+        }
+
+        setOpenTabs((current) => {
+            const preview = current.find((tab) => tab.id === PREVIEW_TAB_ID);
+            if (!preview) {
+                return current;
+            }
+
+            const existingPinned = current.find((tab) => !tab.isPreview && tab.path === preview.path);
+            if (existingPinned) {
+                setActiveTabId(existingPinned.id);
+                return current.filter((tab) => tab.id !== PREVIEW_TAB_ID);
+            }
+
+            const next = current.map((tab) => {
+                if (tab.id !== PREVIEW_TAB_ID) {
+                    return tab;
+                }
+
+                return {
+                    ...tab,
+                    id: preview.path,
+                    title: getTabTitle(preview.path),
+                    isPreview: false,
+                };
+            });
+
+            setActiveTabId(preview.path);
+            return next;
+        });
+    }, [getTabTitle]);
+
+    const handleCloseTab = useCallback((tabId) => {
+        const closingId = String(tabId || '').trim();
+        if (!closingId) {
+            return;
+        }
+
+        setOpenTabs((current) => {
+            const index = current.findIndex((tab) => tab.id === closingId);
+            if (index < 0) {
+                return current;
+            }
+
+            const next = current.filter((tab) => tab.id !== closingId);
+
+            if (activeTabId === closingId) {
+                const fallback = next[index] || next[index - 1] || next[0] || null;
+                if (fallback) {
+                    setActiveTabId(fallback.id);
+                    setActiveFilePath(fallback.path);
+                    setEditorCode(String(fallback.content || ''));
+                } else {
+                    setActiveTabId(null);
+                    setActiveFilePath('untitled.py');
+                    setEditorCode('');
+                }
+            }
+
+            return next;
+        });
+    }, [activeTabId]);
+
+    const handleEditorCodeChange = useCallback((nextCode) => {
+        const value = String(nextCode ?? '');
+        setEditorCode(value);
+
+        setOpenTabs((current) => {
+            if (!activeTabId) {
+                return current;
+            }
+
+            return current.map((tab) => {
+                if (tab.id !== activeTabId) {
+                    return tab;
+                }
+
+                if (tab.content === value && tab.isDirty) {
+                    return tab;
+                }
+
+                return {
+                    ...tab,
+                    content: value,
+                    isDirty: true,
+                };
+            });
+        });
+    }, [activeTabId]);
+
+    useEffect(() => {
+        if (!activeTabId) {
+            return;
+        }
+
+        const activeTab = openTabs.find((tab) => tab.id === activeTabId);
+        if (!activeTab) {
+            return;
+        }
+
+        if (activeFilePath !== activeTab.path) {
+            setActiveFilePath(activeTab.path);
+        }
+
+        const activeContent = String(activeTab.content || '');
+        if (editorCode !== activeContent) {
+            setEditorCode(activeContent);
+        }
+    }, [activeTabId, openTabs]);
 
     const handleOpenDatabaseView = () => {
         setActiveView('database');
@@ -421,17 +636,19 @@ function App() {
                             <AiAssistantPanel />
                         ) : (
                             <EditorPanel
-                                code={editorCode} onChangeCode={setEditorCode}
+                                code={editorCode} onChangeCode={handleEditorCodeChange}
                                 activeFilePath={activeFilePath}
                                 openTabs={openTabs} activeTabId={activeTabId}
-                                onActivateTab={setActiveTabId}
-                                onCloseTab={(id) => setOpenTabs((current) => current.filter((t) => t.id !== id))}
+                                onActivateTab={handleActivateTab}
+                                onCloseTab={handleCloseTab}
+                                onPinPreviewTab={handlePinPreviewTab}
                                 onSaveActiveTab={() => { /* TODO */ }}
                                 onModelMetricsUpdate={handleModelMetricsUpdate}
                                 terminalHeightRatio={paneDimensions.terminalHeightRatio}
                                 onTerminalHeightRatioChange={(v) => updatePaneDimensions({ terminalHeightRatio: v })}
                                 terminalVisible={terminalVisible}
                                 onToggleTerminal={() => setTerminalVisible((current) => !current)}
+                                onTerminalStateChange={setTerminalState}
                             />
                         )}
                     </section>
@@ -450,6 +667,18 @@ function App() {
                                     autoApprovalMode={autoApprovalMode}
                                     onAutoApprovalModeChange={handleAutoApprovalModeChange}
                                     settingsRefreshKey={settingsRefreshKey}
+                                    focusRequestId={chatFocusRequestId}
+                                    ideContext={{
+                                        activeView,
+                                        activeFilePath,
+                                        activeTabId,
+                                        openTabs: openTabs.slice(0, 10).map((tab) => ({
+                                            id: tab.id,
+                                            filePath: tab.filePath,
+                                            title: tab.title,
+                                            isPreview: Boolean(tab.isPreview),
+                                        })),
+                                    }}
                                 />
                             </section>
                         </>
@@ -459,6 +688,7 @@ function App() {
                 <StatusBar
                     hardware={hardware}
                     modelPerf={modelPerf}
+                    terminalState={terminalState}
                     autoApprovalMode={autoApprovalMode}
                     onAutoApprovalModeChange={handleAutoApprovalModeChange}
                     onRefreshSettings={handleRefreshSettings}

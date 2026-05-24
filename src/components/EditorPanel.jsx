@@ -118,6 +118,7 @@ function EditorPanel({
     onTerminalHeightRatioChange,
     terminalVisible = true,
     onToggleTerminal,
+    onTerminalStateChange,
 }) {
     const terminalWrapRef = useRef(null);
     const terminalContainerMapRef = useRef({});
@@ -132,9 +133,25 @@ function EditorPanel({
     const inlineDisposablesRef = useRef([]);
     const aiSettingsRef = useRef(null);
     const onSaveActiveTabRef = useRef(onSaveActiveTab);
+    const terminalsRef = useRef([]);
+    const terminalStatusByIdRef = useRef({});
     const [terminals, setTerminals] = useState([{ id: 'terminal-1', title: 'Terminal 1' }]);
     const [activeTerminalId, setActiveTerminalId] = useState('terminal-1');
+    const [terminalHydrated, setTerminalHydrated] = useState(false);
     const activeTerminalIdRef = useRef('terminal-1');
+
+    const reportTerminalState = () => {
+        const activeId = activeTerminalIdRef.current;
+        const statusMap = terminalStatusByIdRef.current || {};
+        const runningCount = Object.values(statusMap).filter((status) => status === 'running').length;
+
+        onTerminalStateChange?.({
+            total: terminalsRef.current.length,
+            running: runningCount,
+            activeTerminalId: activeId,
+            activeStatus: statusMap[activeId] || 'idle',
+        });
+    };
 
     const disposeInlineCompletions = () => {
         for (const item of inlineDisposablesRef.current) {
@@ -330,7 +347,13 @@ function EditorPanel({
 
     useEffect(() => {
         activeTerminalIdRef.current = activeTerminalId;
+        reportTerminalState();
     }, [activeTerminalId]);
+
+    useEffect(() => {
+        terminalsRef.current = terminals;
+        reportTerminalState();
+    }, [terminals]);
 
     useEffect(() => {
         let mounted = true;
@@ -494,11 +517,50 @@ function EditorPanel({
             cols: term.cols,
             rows: term.rows,
         });
+        terminalStatusByIdRef.current[terminalId] = 'starting';
+        reportTerminalState();
         requestAnimationFrame(() => fitAndSyncTerminal(terminalId));
     };
 
     useEffect(() => {
-        mountTerminalInstance(activeTerminalId);
+        let mounted = true;
+
+        const hydrateTerminalSessions = async () => {
+            try {
+                const response = await runtime?.terminalList?.();
+                const sessions = Array.isArray(response?.terminals) ? response.terminals : [];
+                if (!mounted) {
+                    return;
+                }
+
+                if (sessions.length > 0) {
+                    const hydratedTabs = sessions.map((session, index) => ({
+                        id: String(session?.terminalId || `terminal-${index + 1}`),
+                        title: `Terminal ${index + 1}`,
+                    }));
+                    const statusMap = {};
+                    for (const tab of hydratedTabs) {
+                        statusMap[tab.id] = 'running';
+                    }
+                    terminalStatusByIdRef.current = statusMap;
+                    setTerminals(hydratedTabs);
+                    setActiveTerminalId((current) => (hydratedTabs.some((tab) => tab.id === current) ? current : hydratedTabs[0].id));
+                } else {
+                    terminalStatusByIdRef.current = { 'terminal-1': 'idle' };
+                }
+            } catch {
+                if (mounted) {
+                    terminalStatusByIdRef.current = { 'terminal-1': 'idle' };
+                }
+            } finally {
+                if (mounted) {
+                    setTerminalHydrated(true);
+                    reportTerminalState();
+                }
+            }
+        };
+
+        void hydrateTerminalSessions();
 
         const outputUnsubscribe = runtime?.onTerminalOutput?.((payload) => {
             const terminalId = typeof payload === 'string'
@@ -515,10 +577,54 @@ function EditorPanel({
                     const nextIndex = current.length + 1;
                     return [...current, { id: terminalId, title: `Terminal ${nextIndex}` }];
                 });
+                terminalStatusByIdRef.current[terminalId] = terminalStatusByIdRef.current[terminalId] || 'running';
+                reportTerminalState();
                 return;
             }
 
             terminalInstanceMapRef.current[terminalId].write(data);
+        });
+
+        const statusUnsubscribe = runtime?.onTerminalStatus?.((payload) => {
+            const terminalId = String(payload?.terminalId || activeTerminalIdRef.current);
+            const status = String(payload?.status || 'unknown');
+            if (!terminalsRef.current.some((item) => item.id === terminalId)) {
+                setTerminals((current) => {
+                    if (current.some((item) => item.id === terminalId)) {
+                        return current;
+                    }
+                    const nextIndex = current.length + 1;
+                    return [...current, { id: terminalId, title: `Terminal ${nextIndex}` }];
+                });
+            }
+
+            if (status === 'created') {
+                terminalStatusByIdRef.current[terminalId] = 'running';
+            } else if (status === 'exited') {
+                terminalStatusByIdRef.current[terminalId] = payload?.userClosed ? 'closed' : 'idle';
+            } else if (status === 'closed') {
+                terminalStatusByIdRef.current[terminalId] = 'closed';
+            }
+            reportTerminalState();
+
+            const terminal = terminalInstanceMapRef.current[terminalId];
+            if (!terminal) {
+                return;
+            }
+
+            if (status === 'created') {
+                terminal.write(`\r\n[session ready] ${payload?.cwd || ''}\r\n`);
+                return;
+            }
+
+            if (status === 'exited' && !payload?.userClosed) {
+                terminal.write(`\r\n[session ended] code=${payload?.exitCode ?? 0} signal=${payload?.signal ?? 'none'}\r\n`);
+                return;
+            }
+
+            if (status === 'closed') {
+                terminal.write('\r\n[session closed]\r\n');
+            }
         });
 
         const resizeObserver = new ResizeObserver(() => {
@@ -530,9 +636,13 @@ function EditorPanel({
         }
 
         return () => {
+            mounted = false;
             resizeObserver.disconnect();
             if (outputUnsubscribe) {
                 outputUnsubscribe();
+            }
+            if (statusUnsubscribe) {
+                statusUnsubscribe();
             }
 
             for (const terminalId of Object.keys(terminalCleanupMapRef.current)) {
@@ -542,15 +652,20 @@ function EditorPanel({
     }, []);
 
     useEffect(() => {
+        if (!terminalHydrated) {
+            return;
+        }
         requestAnimationFrame(() => mountTerminalInstance(activeTerminalId));
         requestAnimationFrame(() => fitAndSyncTerminal(activeTerminalId));
-    }, [activeTerminalId, terminals.length]);
+    }, [activeTerminalId, terminals.length, terminalHydrated]);
 
     const createTerminal = () => {
         const nextIndex = terminals.length + 1;
         const terminalId = `terminal-${Date.now()}`;
+        terminalStatusByIdRef.current[terminalId] = 'starting';
         setTerminals((current) => [...current, { id: terminalId, title: `Terminal ${nextIndex}` }]);
         setActiveTerminalId(terminalId);
+        reportTerminalState();
     };
 
     const closeTerminal = (terminalId) => {
@@ -560,6 +675,7 @@ function EditorPanel({
 
         destroyTerminalInstance(terminalId);
         void runtime?.terminalClose?.({ terminalId });
+        delete terminalStatusByIdRef.current[terminalId];
 
         setTerminals((current) => {
             const next = current.filter((item) => item.id !== terminalId);
@@ -568,6 +684,7 @@ function EditorPanel({
             }
             return next;
         });
+        reportTerminalState();
     };
 
     return (

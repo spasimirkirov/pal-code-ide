@@ -3,6 +3,7 @@ import { DEFAULT_CHAT_SESSION_ID, defaultAiSettings } from '../config/aiConfig';
 import ChatComposer from './chat/ChatComposer';
 import ChatHeaderBar from './chat/ChatHeaderBar';
 import ChatMessageItem from './chat/ChatMessageItem';
+import { shouldAutoApproveAction } from '../utils/aiHelpers';
 
 const runtime = window.palRuntime;
 const electronAPI = window.electronAPI;
@@ -14,7 +15,90 @@ const DEFAULT_MESSAGES = [
 const updateMessageById = (messages, id, updater) =>
     messages.map((msg) => (msg.id === id ? (typeof updater === 'function' ? updater(msg) : updater) : msg));
 
-function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoApprovalMode, onAutoApprovalModeChange, settingsRefreshKey }) {
+const hashText = (value) => {
+    const text = String(value || '');
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+};
+
+const ensureActionIds = (actions, scope = 'action') => {
+    const list = Array.isArray(actions) ? actions : [];
+    return list.map((action, index) => {
+        const actionId = String(action?.actionId || '').trim();
+        if (actionId) {
+            return action;
+        }
+
+        const signature = hashText(JSON.stringify({ ...action, actionId: undefined }));
+        return {
+            ...action,
+            actionId: `${scope}:${index}:${signature}`,
+        };
+    });
+};
+
+const compactProgressLine = (value) => {
+    const normalized = String(value || '')
+        .replace(/\r/g, '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .filter((line) => !/^tokens:\s+/i.test(line))
+        .filter((line) => line !== '>');
+
+    if (!normalized.length) {
+        return '';
+    }
+
+    const line = normalized[normalized.length - 1].replace(/\s+/g, ' ').trim();
+    return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+};
+
+const summarizeActions = (actions) => {
+    const list = Array.isArray(actions) ? actions : [];
+    if (!list.length) {
+        return '';
+    }
+
+    const topItems = list.slice(0, 4).map((action) => {
+        const type = String(action?.type || 'action').replace(/-/g, ' ');
+        const path = String(action?.path || '').trim();
+        if (path) {
+            return `${type}: ${path}`;
+        }
+
+        const summary = String(action?.summary || '').trim();
+        return summary || type;
+    });
+
+    const extra = list.length - topItems.length;
+    const details = topItems.map((item) => `- ${item}`).join('\n');
+    const extraLine = extra > 0 ? `\n- +${extra} more action(s)` : '';
+    return `Done. ${list.length} action(s) prepared.\n${details}${extraLine}`;
+};
+
+const summarizeFinalResponse = (payloadText, actions) => {
+    const actionSummary = summarizeActions(actions);
+    if (actionSummary) {
+        return actionSummary;
+    }
+
+    const compact = String(payloadText || '')
+        .replace(/\r/g, '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(0, 4)
+        .join('\n');
+
+    return compact || 'Done.';
+};
+
+function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoApprovalMode, onAutoApprovalModeChange, settingsRefreshKey, focusRequestId, ideContext }) {
     const [messages, setMessages] = useState(DEFAULT_MESSAGES);
     const [prompt, setPrompt] = useState('');
     const [isSending, setIsSending] = useState(false);
@@ -27,6 +111,7 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
     const sessionHydratingRef = useRef(false);
     const activeTraceIdRef = useRef('');
     const activeCleanupRef = useRef(null);
+    const composerRef = useRef(null);
     const appliedRef = useRef(appliedActionIds);
     const deniedRef = useRef(deniedActionIds);
     const messagesRef = useRef(messages);
@@ -82,6 +167,104 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
 
     useEffect(() => { autoScroll(); }, [messages]);
 
+    useEffect(() => {
+        if (focusRequestId === undefined || focusRequestId === null) {
+            return;
+        }
+
+        const focusComposer = () => {
+            window.focus?.();
+            composerRef.current?.focus?.();
+        };
+
+        const timer = window.setTimeout(focusComposer, 0);
+        const retryTimer = window.setTimeout(focusComposer, 60);
+
+        return () => {
+            window.clearTimeout(timer);
+            window.clearTimeout(retryTimer);
+        };
+    }, [focusRequestId]);
+
+    const executeWorkspaceActionDirect = useCallback(async (action) => {
+        const actionType = String(action?.type || '').replace(/_/g, '-').trim().toLowerCase();
+        const actionPath = String(action?.path || '').trim();
+
+        if (!actionType) {
+            return { ok: false, error: 'Missing action type.' };
+        }
+
+        if (actionType === 'patch-search-replace') {
+            if (!actionPath || actionPath === 'unknown') {
+                return { ok: false, error: 'Patch action is missing a valid file path.' };
+            }
+
+            const patches = Array.isArray(action?.patches) ? action.patches : [];
+            const blocks = patches
+                .map((patch) => ({
+                    search: String(patch?.search ?? patch?.find ?? ''),
+                    replace: String(patch?.replace ?? ''),
+                }))
+                .filter((block) => block.search);
+
+            if (!blocks.length) {
+                return { ok: false, error: 'Patch action does not include valid search/replace blocks.' };
+            }
+
+            return await window.projectRuntime?.patchSearchReplace?.({ path: actionPath, blocks })
+                || { ok: false, error: 'Patch service is unavailable.' };
+        }
+
+        if (actionType === 'patch-file') {
+            return await runtime?.workspacePatchFile?.({ path: actionPath, patches: action?.patches, backup: true })
+                || { ok: false, error: 'Workspace patch service is unavailable.' };
+        }
+
+        if (actionType === 'write-file') {
+            return await runtime?.workspaceWriteFile?.({ path: actionPath, content: String(action?.content || ''), backup: true })
+                || { ok: false, error: 'Workspace write service is unavailable.' };
+        }
+
+        if (actionType === 'delete-file') {
+            return await runtime?.workspaceDeleteFile?.({ path: actionPath })
+                || { ok: false, error: 'Workspace delete service is unavailable.' };
+        }
+
+        if (actionType === 'create-folder') {
+            const normalizedPath = actionPath.replace(/\\/g, '/').replace(/\/+$/, '');
+            const segments = normalizedPath.split('/').filter(Boolean);
+            const name = segments.pop() || '';
+            const parentPath = segments.join('/') || '.';
+
+            if (!name) {
+                return { ok: false, error: 'Folder action is missing target name.' };
+            }
+
+            return await runtime?.workspaceCreatePath?.({
+                parentPath,
+                name,
+                type: 'folder',
+            }) || { ok: false, error: 'Workspace create service is unavailable.' };
+        }
+
+        if (actionType === 'terminal-command') {
+            return await runtime?.terminalExecute?.({
+                command: String(action?.command || ''),
+                shell: String(action?.shell || 'powershell'),
+                timeoutMs: Number(action?.timeoutMs || 120000),
+            }) || { ok: false, error: 'Terminal execution service is unavailable.' };
+        }
+
+        if (actionType === 'web-search') {
+            return await runtime?.duckduckgoSearch?.({
+                query: String(action?.query || ''),
+                maxResults: Number(action?.maxResults || 6),
+            }) || { ok: false, error: 'Web search service is unavailable.' };
+        }
+
+        return { ok: false, error: `Unsupported action type: ${actionType}` };
+    }, []);
+
     // ── Send prompt ───────────────────────────────────────────────────
 
     const sendPrompt = async (event) => {
@@ -103,7 +286,15 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
         setMessages((current) => [
             ...current,
             { id: userId, role: 'user', text: trimmed, status: 'done' },
-            { id: assistantId, role: 'assistant', text: '', thinking: '', executionSteps: [], status: 'streaming' },
+            {
+                id: assistantId,
+                role: 'assistant',
+                text: '',
+                thinking: '',
+                activity: 'Planning steps...',
+                executionSteps: [],
+                status: 'streaming',
+            },
         ]);
 
         // Per-session event subscriptions
@@ -114,31 +305,38 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
         const onChunk = (payload) => {
             if (payload.traceId !== assistantId) return;
             accumulatedText += payload.text;
+            const activity = compactProgressLine(payload.text);
             setMessages((current) => updateMessageById(current, assistantId, (msg) => ({
-                ...msg, text: (msg.text || '') + payload.text,
+                ...msg,
+                activity: activity || msg.activity || 'Working...',
             })));
         };
 
         const onThinking = (payload) => {
             if (payload.traceId !== assistantId) return;
+            const activity = compactProgressLine(payload.text);
             setMessages((current) => updateMessageById(current, assistantId, (msg) => ({
-                ...msg, thinking: (msg.thinking || '') + payload.text,
+                ...msg,
+                activity: activity || msg.activity || 'Thinking...',
             })));
         };
 
         const onStreamText = (payload) => {
             if (payload.traceId !== assistantId) return;
             accumulatedText = payload.text;
+            const activity = compactProgressLine(payload.text);
             setMessages((current) => updateMessageById(current, assistantId, (msg) => ({
-                ...msg, text: payload.text,
+                ...msg,
+                activity: activity || msg.activity || 'Working...',
             })));
         };
 
         const onNativeAction = (payload) => {
             if (payload.traceId !== assistantId) return;
-            actionsDuringStream.push(payload.action);
+            const [normalizedAction] = ensureActionIds([payload.action], assistantId);
+            actionsDuringStream.push(normalizedAction);
             setMessages((current) => updateMessageById(current, assistantId, (msg) => ({
-                ...msg, workspaceActions: [...(msg.workspaceActions || []), payload.action],
+                ...msg, workspaceActions: [...(msg.workspaceActions || []), normalizedAction],
             })));
         };
 
@@ -180,11 +378,14 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
                 : payload.actions?.length
                     ? payload.actions
                     : null;
+            const normalizedActions = ensureActionIds(finalActions || [], assistantId);
+            const summaryText = summarizeFinalResponse(payload.text || accumulatedText, normalizedActions);
             setMessages((current) => updateMessageById(current, assistantId, (msg) => ({
                 ...msg,
-                text: payload.text || msg.text,
+                text: summaryText,
+                activity: '',
                 status: 'done',
-                workspaceActions: finalActions || msg.workspaceActions,
+                workspaceActions: normalizedActions.length ? normalizedActions : msg.workspaceActions,
             })));
             setIsSending(false);
             activeTraceIdRef.current = '';
@@ -194,12 +395,23 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
         const onError = (payload) => {
             if (payload.traceId !== assistantId) return;
             cleanup();
-            const isModelError = /no model/i.test(String(payload.error || ''));
+            const rawError = String(payload.error || '');
+            const isModelError = /no model/i.test(rawError);
+            const isTemplateMismatch = String(payload.errorCode || '') === 'template-mismatch'
+                || /No user query found in messages/i.test(rawError)
+                || /jinja template/i.test(rawError)
+                || /prompt template/i.test(rawError);
+            const isOverflow = /stream size limit/i.test(rawError);
             setMessages((current) => updateMessageById(current, assistantId, (msg) => ({
                 ...msg,
-                text: isModelError
-                    ? `Backend unavailable: ${payload.error}\n\nFix:\n1) If using LM Studio: load/select a model in AI Assistant -> LM Studio.\n2) If using Ollama: start Ollama and select an Active Model in AI Assistant -> Ollama.`
+                text: isOverflow
+                    ? 'Agent output was too verbose for live streaming. Please retry in concise mode if no action cards are shown.'
+                    : isTemplateMismatch
+                    ? 'This model template in LM Studio is not compatible with the agent flow. Open LM Studio -> My Models -> Prompt Template and switch to a fixed template or the lmstudio-community variant, then retry.'
+                    : isModelError
+                    ? `Backend unavailable: ${payload.error}\n\nFix:\n1) Open AI Assistant -> LM Studio.\n2) Load/select a model and retry.`
                     : `Backend unavailable: ${payload.error}`,
+                activity: '',
                 status: 'done',
             })));
             setIsSending(false);
@@ -236,6 +448,7 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
             history,
             settings: { ...(freshSettings || aiSettings), autoApprovalMode },
             workspaceRoot,
+            ideContext,
         });
     };
 
@@ -268,10 +481,42 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
     // ── Action approve/deny ───────────────────────────────────────────
 
     const approveWorkspaceAction = async (action) => {
-        const actionId = action?.actionId;
-        if (actionId) {
-            setDeniedActionIds((current) => current.filter((id) => id !== actionId));
-            await AIM?.respondToAction?.({ traceId: activeTraceIdRef.current, actionId, approved: true });
+        const actionId = String(action?.actionId || '').trim();
+        if (!actionId) return;
+
+        const currentActionState = workspaceActionState[actionId];
+
+        setDeniedActionIds((current) => current.filter((id) => id !== actionId));
+        setWorkspaceActionState((current) => ({
+            ...current,
+            [actionId]: { ...(current[actionId] || {}), status: 'running', phase: 'executing', detail: '' },
+        }));
+
+        const activeTraceId = String(activeTraceIdRef.current || '').trim();
+        const shouldUseRuntimeApproval = Boolean(
+            isSending
+            && activeTraceId
+            && currentActionState?.phase === 'awaiting_approval',
+        );
+
+        if (shouldUseRuntimeApproval) {
+            await AIM?.respondToAction?.({ traceId: activeTraceId, actionId, approved: true });
+            return;
+        }
+
+        const result = await executeWorkspaceActionDirect(action);
+        setWorkspaceActionState((current) => ({
+            ...current,
+            [actionId]: {
+                ...(current[actionId] || {}),
+                status: result?.ok ? 'success' : 'error',
+                phase: result?.ok ? 'succeeded' : 'failed',
+                detail: result?.ok ? '' : String(result?.error || 'Action failed.'),
+            },
+        }));
+
+        if (result?.ok) {
+            setAppliedActionIds((current) => (current.includes(actionId) ? current : [...current, actionId]));
         }
     };
 
@@ -282,6 +527,72 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
         setWorkspaceActionState((current) => ({ ...current, [actionId]: { status: 'denied', phase: 'cancelled', errorCategory: 'user-denied', detail: 'Denied by user.' } }));
         void AIM?.respondToAction?.({ traceId: activeTraceIdRef.current, actionId, approved: false });
     };
+
+    useEffect(() => {
+        const pendingAutoActions = [];
+
+        for (const message of messages) {
+            if (message?.role !== 'assistant') {
+                continue;
+            }
+
+            const workspaceActions = Array.isArray(message.workspaceActions) ? message.workspaceActions : [];
+            for (const action of workspaceActions) {
+                const actionId = String(action?.actionId || '').trim();
+                if (!actionId) {
+                    continue;
+                }
+
+                if (appliedRef.current.includes(actionId) || deniedRef.current.includes(actionId)) {
+                    continue;
+                }
+
+                const state = workspaceActionState[actionId];
+                if (state?.status === 'running' || state?.status === 'queued' || state?.status === 'success' || state?.status === 'error') {
+                    continue;
+                }
+
+                const isTerminal = String(action?.type || '').trim() === 'terminal-command';
+                if (isTerminal || !shouldAutoApproveAction(action, autoApprovalMode)) {
+                    continue;
+                }
+
+                pendingAutoActions.push(action);
+            }
+        }
+
+        if (!pendingAutoActions.length) {
+            return;
+        }
+
+        setWorkspaceActionState((current) => {
+            const next = { ...current };
+            for (const action of pendingAutoActions) {
+                const actionId = String(action?.actionId || '').trim();
+                if (!actionId) {
+                    continue;
+                }
+
+                const existing = next[actionId];
+                if (existing?.status === 'running' || existing?.status === 'queued' || existing?.status === 'success' || existing?.status === 'error') {
+                    continue;
+                }
+
+                next[actionId] = {
+                    ...(existing || {}),
+                    status: 'queued',
+                    phase: 'auto-approval',
+                    detail: 'Queued for automatic apply.',
+                };
+            }
+
+            return next;
+        });
+
+        for (const action of pendingAutoActions) {
+            void approveWorkspaceAction(action);
+        }
+    }, [messages, autoApprovalMode, workspaceActionState, approveWorkspaceAction]);
 
     const handleNewSession = () => {
         setPrompt('');
@@ -318,7 +629,15 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
                         onDenyWorkspaceAction={denyWorkspaceAction}
                     />
                 )),
-        [messages, onApplyCode, workspaceActionState, appliedActionIds],
+        [
+            messages,
+            onApplyCode,
+            workspaceActionState,
+            appliedActionIds,
+            autoApprovalMode,
+            approveWorkspaceAction,
+            denyWorkspaceAction,
+        ],
     );
 
     return (
@@ -331,6 +650,7 @@ function ChatPanel({ onApplyCode, workspaceRoot, onModelMetricsUpdate, autoAppro
                 {renderedMessages}
             </div>
             <ChatComposer
+                ref={composerRef}
                 prompt={prompt}
                 onPromptChange={setPrompt}
                 onPromptKeyDown={handlePromptKeyDown}

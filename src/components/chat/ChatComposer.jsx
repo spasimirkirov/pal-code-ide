@@ -1,8 +1,16 @@
-import React from 'react';
-import { Box, IconButton, Typography } from '@mui/material';
+import React, { forwardRef, useImperativeHandle, useRef } from 'react';
+import { Box, Button, Typography } from '@mui/material';
 import { ArrowUp, Square } from 'lucide-react';
 
-function ChatComposer({ prompt, onPromptChange, onPromptKeyDown, onSubmit, onCancel, isSending }) {
+const ChatComposer = forwardRef(function ChatComposer({ prompt, onPromptChange, onPromptKeyDown, onSubmit, onCancel, isSending }, ref) {
+    const textareaRef = useRef(null);
+
+    useImperativeHandle(ref, () => ({
+        focus: () => {
+            textareaRef.current?.focus?.();
+        },
+    }), []);
+
     const canSend = Boolean(prompt.trim());
 
     return (
@@ -17,6 +25,7 @@ function ChatComposer({ prompt, onPromptChange, onPromptKeyDown, onSubmit, onCan
             <Box sx={{ position: 'relative' }}>
                 <Box
                     component="textarea"
+                    ref={textareaRef}
                     value={prompt}
                     onChange={(e) => onPromptChange(e.target.value)}
                     onKeyDown={onPromptKeyDown}
@@ -41,14 +50,17 @@ function ChatComposer({ prompt, onPromptChange, onPromptKeyDown, onSubmit, onCan
                         '&::-webkit-scrollbar-thumb': { bgcolor: 'rgba(148,163,184,0.2)', borderRadius: 2 },
                     }}
                 />
-                <IconButton
+                <Button
                     type={isSending ? 'button' : 'submit'}
                     onClick={isSending ? onCancel : undefined}
                     disabled={!isSending && !canSend}
                     size="small"
+                    variant="contained"
+                    startIcon={isSending ? <Square size={13} /> : <ArrowUp size={15} />}
                     sx={{
-                        position: 'absolute', bottom: 6, right: 6,
-                        width: 28, height: 28,
+                        position: 'absolute', bottom: 8, right: 8,
+                        height: 32,
+                        minWidth: 120,
                         bgcolor: isSending
                             ? 'rgba(239,68,68,0.9)'
                             : canSend
@@ -60,6 +72,9 @@ function ChatComposer({ prompt, onPromptChange, onPromptKeyDown, onSubmit, onCan
                                 ? '#05070e'
                                 : 'rgba(148,163,184,0.4)',
                         borderRadius: '8px',
+                        textTransform: 'none',
+                        fontWeight: 700,
+                        fontSize: '0.75rem',
                         transition: 'all 0.15s',
                         '&:hover': {
                             bgcolor: isSending ? 'rgba(220,38,38,0.95)' : 'primary.light',
@@ -68,17 +83,17 @@ function ChatComposer({ prompt, onPromptChange, onPromptKeyDown, onSubmit, onCan
                         '&.Mui-disabled': { bgcolor: 'rgba(148,163,184,0.08)', color: 'rgba(148,163,184,0.25)' },
                     }}
                 >
-                    {isSending ? <Square size={13} /> : <ArrowUp size={15} />}
-                </IconButton>
+                    {isSending ? 'Stop Agent' : 'Run Agent'}
+                </Button>
             </Box>
             <Typography
                 variant="caption"
                 sx={{ mt: 0.5, ml: 0.5, color: 'text.disabled', display: 'block', fontSize: '0.6rem', opacity: 0.5 }}
             >
-                {isSending ? 'Click stop to cancel current task' : 'Enter to send • Shift+Enter for newline'}
+                {isSending ? 'Agent is running. Click Stop Agent to cancel.' : 'Run Agent or press Enter • Shift+Enter for newline'}
             </Typography>
         </Box>
     );
-}
+});
 
 export default ChatComposer;

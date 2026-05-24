@@ -1,4 +1,4 @@
-const TOOL_NAME_BY_ACTION_TYPE = {
+export const TOOL_NAME_BY_ACTION_TYPE = {
     'list-files': 'workspace_list_files',
     'ls-dir': 'workspace_ls_dir',
     'read-file': 'workspace_read_file',
@@ -151,6 +151,8 @@ const ACTION_TYPE_BY_TOOL_NAME = Object.entries(TOOL_NAME_BY_ACTION_TYPE).reduce
 // Backward-compatible tool-name aliases. Keep existing workspace_* names intact.
 Object.assign(ACTION_TYPE_BY_TOOL_NAME, {
     'read-file': 'read-file',
+    workspace_write_int_file: 'write-file',
+    write_int_file: 'write-file',
 });
 
 const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
@@ -375,7 +377,7 @@ export const WORKSPACE_TOOL_DEFINITIONS = [
             type: 'object',
             properties: {
                 command: { type: 'string', description: 'Terminal command string to run.' },
-                shell: { type: 'string', enum: ['powershell', 'cmd'], description: 'Shell runtime.' },
+                shell: { type: 'string', enum: ['powershell', 'cmd', 'bash', 'zsh', 'sh'], description: 'Shell runtime.' },
                 timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000, description: 'Command timeout in milliseconds.' },
                 summary: { type: 'string', description: 'Short reason for the command.' },
             },
@@ -888,6 +890,7 @@ export const validateAndNormalizeToolArgs = ({ toolName, args }) => {
     if (actionType === 'terminal-command') {
         const command = String(payload.command || '').trim();
         const shell = String(payload.shell || 'powershell').toLowerCase();
+        const allowedShells = new Set(['powershell', 'cmd', 'bash', 'zsh', 'sh']);
         const minTimeout = TOOL_EXECUTION_LIMITS[actionType].minTimeoutMs;
         const maxTimeout = TOOL_EXECUTION_LIMITS[actionType].maxTimeoutMs;
         const timeoutMs = Math.min(maxTimeout, Math.max(minTimeout, toInt(payload.timeoutMs, 120000)));
@@ -912,10 +915,10 @@ export const validateAndNormalizeToolArgs = ({ toolName, args }) => {
                 { field: 'command' },
             );
         }
-        if (shell !== 'powershell' && shell !== 'cmd') {
+        if (!allowedShells.has(shell)) {
             return failValidation(
                 TOOL_VALIDATION_ERROR_CODE.INVALID_FIELD_VALUE,
-                `${toolName}.shell must be powershell or cmd.`,
+                `${toolName}.shell must be one of: powershell, cmd, bash, zsh, sh.`,
                 { field: 'shell' },
             );
         }

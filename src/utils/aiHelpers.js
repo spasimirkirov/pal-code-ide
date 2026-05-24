@@ -407,16 +407,25 @@ export const stripActionJsonBlocks = (text) =>
 
 export const shouldAutoApproveAction = (action, mode) => {
     const policy = String(mode || 'manual');
+    const type = String(action?.type || '').trim();
     if (policy === 'all') {
-        return action?.type !== 'terminal-command';
+        return type !== 'terminal-command';
     }
 
     if (policy === 'safe') {
-        return action?.type === 'list-files'
-            || action?.type === 'read-file'
-            || action?.type === 'search-text'
-            || action?.type === 'get-errors'
-            || action?.type === 'patch-file';
+        return type === 'list-files'
+            || type === 'ls-dir'
+            || type === 'read-file'
+            || type === 'search-text'
+            || type === 'search-paths'
+            || type === 'get-errors'
+            || type === 'project-get-metadata'
+            || type === 'code-search'
+            || type === 'code-find-by-type'
+            || type === 'code-find-in-file'
+            || type === 'validation-run-all'
+            || type === 'validation-run-build'
+            || type === 'validation-run-tests';
     }
 
     return false;
@@ -503,6 +512,84 @@ const flattenTreeToLines = (nodes, depth = 0, lines = []) => {
 };
 
 export { flattenTreeToLines };
+
+// ── SEARCH/REPLACE Edit Block Parser ──────────────────────────────────────
+
+const SEARCH_START = /<<<<<<<\s*SEARCH\s*/;
+const DIVIDER = /=======\s*/;
+const REPLACE_END = />>>>>>>\s*REPLACE\s*/;
+
+/**
+ * Parse SEARCH/REPLACE blocks grouped by FILE: / CREATE: / DELETE: markers.
+ * Returns [{ type: 'edit'|'create'|'delete', path, search?, replace? }]
+ */
+export const parseSearchReplaceEditBlocks = (text) => {
+    const actions = [];
+    const lines = String(text || '').split('\n');
+    let i = 0;
+
+    while (i < lines.length) {
+        const fileMatch = lines[i].match(/^(FILE|CREATE|DELETE):\s*(.+)/i);
+        if (fileMatch) {
+            const type = fileMatch[1].toLowerCase();
+            const path = fileMatch[2].trim();
+            i++;
+
+            if (type === 'delete') {
+                actions.push({ type: 'delete', path });
+                continue;
+            }
+
+            // Parse SEARCH/REPLACE block that follows
+            const searchLines = [];
+            const replaceLines = [];
+            let foundSearch = false;
+            let foundDivider = false;
+            let foundReplaceEnd = false;
+
+            while (i < lines.length) {
+                if (!foundSearch && SEARCH_START.test(lines[i])) {
+                    foundSearch = true;
+                    i++;
+                    continue;
+                }
+                if (foundSearch && !foundDivider) {
+                    if (DIVIDER.test(lines[i])) {
+                        foundDivider = true;
+                        i++;
+                        continue;
+                    }
+                    searchLines.push(lines[i]);
+                    i++;
+                    continue;
+                }
+                if (foundSearch && foundDivider) {
+                    if (REPLACE_END.test(lines[i])) {
+                        foundReplaceEnd = true;
+                        i++;
+                        break;
+                    }
+                    replaceLines.push(lines[i]);
+                    i++;
+                    continue;
+                }
+                i++;
+            }
+
+            if (foundReplaceEnd) {
+                const search = searchLines.join('\n').replace(/\s+$/, '');
+                const replace = replaceLines.join('\n').replace(/\s+$/, '');
+                actions.push({ type, path, search, replace });
+            } else {
+                actions.push({ type, path, search: searchLines.join('\n'), replace: replaceLines.join('\n') });
+            }
+            continue;
+        }
+        i++;
+    }
+
+    return actions;
+};
 
 export const buildWorkspaceContext = async ({ promptText, workspaceRoot, traceId }) => {
     const text = String(promptText || '').trim();

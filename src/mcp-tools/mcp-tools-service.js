@@ -19,11 +19,35 @@ export const createMcpToolsService = ({ getWorkspaceRoot }) => {
             throw new Error('Terminal tool requires a command string.');
         }
 
-        const shellName = String(shell).toLowerCase() === 'cmd' ? 'cmd' : 'powershell';
-        const shellCommand =
-            shellName === 'cmd'
-                ? ['cmd.exe', ['/d', '/c', command]]
-                : ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command]];
+        const normalizedShell = String(shell || '').toLowerCase();
+        const isWindows = process.platform === 'win32';
+        let shellName = normalizedShell;
+
+        if (!shellName) {
+            shellName = isWindows ? 'powershell' : 'bash';
+        }
+
+        if (isWindows && (shellName === 'bash' || shellName === 'zsh' || shellName === 'sh')) {
+            shellName = 'powershell';
+        }
+        if (!isWindows && (shellName === 'powershell' || shellName === 'cmd')) {
+            shellName = 'bash';
+        }
+
+        let shellCommand;
+        if (isWindows) {
+            shellCommand =
+                shellName === 'cmd'
+                    ? ['cmd.exe', ['/d', '/c', command]]
+                    : ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command]];
+        } else {
+            const unixShell = shellName === 'zsh'
+                ? process.env.SHELL || '/bin/zsh'
+                : shellName === 'sh'
+                    ? '/bin/sh'
+                    : '/bin/bash';
+            shellCommand = [unixShell, ['-lc', command]];
+        }
 
         return new Promise((resolve, reject) => {
             const [execName, args] = shellCommand;

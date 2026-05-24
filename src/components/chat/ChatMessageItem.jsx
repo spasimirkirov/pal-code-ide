@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import {
     Box, Typography, Button, Chip, Accordion, AccordionSummary, AccordionDetails,
-    Stack, IconButton,
+    Stack,
 } from '@mui/material';
 import {
-    Bot, ChevronRight, FileText, LoaderCircle, PencilLine, Search, Sparkles, User, Check, X, FileDiff,
+    Bot, Check, ChevronRight, FileDiff, FileText, LoaderCircle, PencilLine, Search, Sparkles, User, X,
 } from 'lucide-react';
 import { extractCodeBlocks, parseWorkspaceActionBlocks, shouldAutoApproveAction, stripActionJsonBlocks } from '../../utils/aiHelpers';
 import DiffViewer from '../DiffViewer';
@@ -17,11 +17,20 @@ function ChatMessageItem({
     const [diffLoading, setDiffLoading] = useState({});
     const [diffVisible, setDiffVisible] = useState({});
 
-    const loadDiff = async (actionKey, filePath) => {
+    const loadDiff = async (actionKey, action) => {
         if (diffData[actionKey] || diffLoading[actionKey]) return;
         setDiffLoading((prev) => ({ ...prev, [actionKey]: true }));
         try {
-            const result = await window.projectRuntime?.patchCreateDiff?.({ filePath });
+            const actionPath = String(action?.path || '').trim();
+            const patches = Array.isArray(action?.patches) ? action.patches : [];
+            let result = null;
+
+            if (actionPath && patches.length > 0) {
+                result = await window.projectRuntime?.patchPreviewPatch?.({ path: actionPath, patches });
+            } else if (actionPath) {
+                result = await window.projectRuntime?.patchCreateDiff?.({ filePath: actionPath });
+            }
+
             if (result?.ok && result.diff) {
                 setDiffData((prev) => ({ ...prev, [actionKey]: result.diff }));
             } else {
@@ -34,15 +43,16 @@ function ChatMessageItem({
         }
     };
 
-    const toggleDiff = (actionKey, filePath) => {
+    const toggleDiff = (actionKey, action) => {
         if (!diffData[actionKey] && !diffLoading[actionKey]) {
-            loadDiff(actionKey, filePath);
+            loadDiff(actionKey, action);
         }
         setDiffVisible((prev) => ({ ...prev, [actionKey]: !prev[actionKey] }));
     };
 
     const isUser = message.role === 'user';
     const visibleText = isUser ? String(message.text || '') : stripActionJsonBlocks(String(message.text || ''));
+    const activityText = String(message.activity || '').trim();
     const codeBlocks = extractCodeBlocks(visibleText);
     const lastCodeBlock = codeBlocks[codeBlocks.length - 1];
     const workspaceActionSource = String(message.rawToolText || message.text || '');
@@ -141,6 +151,27 @@ function ChatMessageItem({
             )}
 
             {/* Thinking block */}
+            {!isUser && message.status === 'streaming' && activityText && (
+                <Box
+                    sx={{
+                        mb: 1, p: 1, borderRadius: '6px',
+                        bgcolor: 'rgba(43,209,255,0.06)', border: '1px solid', borderColor: 'rgba(43,209,255,0.2)',
+                        display: 'flex', alignItems: 'center', gap: 0.75,
+                    }}
+                >
+                    <LoaderCircle size={12} className="animate-spin" style={{ color: '#2bd1ff' }} />
+                    <Typography
+                        variant="caption"
+                        sx={{
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                            color: 'rgba(191,245,255,0.9)', fontSize: '0.7rem', fontFamily: 'monospace',
+                        }}
+                    >
+                        {activityText}
+                    </Typography>
+                </Box>
+            )}
+
             {!isUser && message.thinking && (
                 <Box
                     sx={{
@@ -165,20 +196,22 @@ function ChatMessageItem({
             )}
 
             {/* Message text */}
-            <Typography
-                component="div"
-                sx={{
-                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    fontFamily: 'monospace', fontSize: '0.8125rem', lineHeight: 1.65,
-                    color: visibleText ? 'rgba(226,232,240,0.92)' : 'text.disabled',
-                    '& code': {
-                        bgcolor: 'rgba(148,163,184,0.1)', px: 0.5, py: 0.125, borderRadius: '4px',
-                        fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace',
-                    },
-                }}
-            >
-                {visibleText || (message.status === 'streaming' ? 'Working...' : '')}
-            </Typography>
+            {(visibleText || message.status !== 'streaming') && (
+                <Typography
+                    component="div"
+                    sx={{
+                        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        fontFamily: 'monospace', fontSize: '0.8125rem', lineHeight: 1.65,
+                        color: visibleText ? 'rgba(226,232,240,0.92)' : 'text.disabled',
+                        '& code': {
+                            bgcolor: 'rgba(148,163,184,0.1)', px: 0.5, py: 0.125, borderRadius: '4px',
+                            fontSize: '0.75rem', fontFamily: '"JetBrains Mono", monospace',
+                        },
+                    }}
+                >
+                    {visibleText}
+                </Typography>
+            )}
 
             {/* Code action buttons */}
             {!isUser && lastCodeBlock && (
@@ -222,14 +255,19 @@ function ChatMessageItem({
                         const isApplied = appliedActionIds.includes(wa.actionId);
                         const isTerminal = wa.type === 'terminal-command';
                         const isWebSearch = wa.type === 'web-search';
+                        const hasInlinePatches = Array.isArray(wa.patches) && wa.patches.length > 0;
+                        const canPreviewDiff = Boolean(wa.path) && (hasInlinePatches || isApplied);
                         const isDenied = actionState?.status === 'denied';
+                        const isQueuedAuto = actionState?.status === 'queued';
                         const needsApproval = !isApplied && !isDenied && actionState?.status !== 'running'
                             && (!shouldAutoApproveAction(wa, autoApprovalMode) || isTerminal);
+                        const isAutoApprovedAction = !isTerminal && shouldAutoApproveAction(wa, autoApprovalMode);
 
                         let statusColor = 'rgba(148,163,184,0.25)';
-                        let statusText = '';
+                        let statusText = isAutoApprovedAction ? 'auto' : 'pending';
                         if (isApplied) { statusColor = 'rgba(52,211,153,0.6)'; statusText = 'done'; }
                         if (isDenied) { statusColor = 'rgba(251,113,133,0.6)'; statusText = 'denied'; }
+                        if (isQueuedAuto) { statusColor = 'rgba(43,209,255,0.6)'; statusText = 'queued'; }
                         if (actionState?.status === 'running') { statusColor = 'rgba(43,209,255,0.6)'; statusText = '...'; }
 
                         const typeColors = {
@@ -318,30 +356,56 @@ function ChatMessageItem({
                                 <Box sx={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 0.25, ml: 'auto' }}>
                                     {needsApproval ? (
                                         <>
-                                            <IconButton
+                                            <Button
                                                 size="small"
+                                                variant="outlined"
                                                 onClick={() => onApproveWorkspaceAction?.(wa)}
-                                                sx={{ width: 18, height: 18, borderRadius: '3px', color: 'success.main', '&:hover': { bgcolor: 'rgba(52,211,153,0.15)' } }}
+                                                sx={{
+                                                    minWidth: 0,
+                                                    px: 0.75,
+                                                    py: 0.1,
+                                                    borderRadius: '3px',
+                                                    fontSize: '0.55rem',
+                                                    lineHeight: 1.2,
+                                                    textTransform: 'none',
+                                                    borderColor: 'rgba(52,211,153,0.5)',
+                                                    color: 'success.light',
+                                                    '&:hover': { bgcolor: 'rgba(52,211,153,0.15)', borderColor: 'rgba(52,211,153,0.7)' },
+                                                }}
                                             >
-                                                <Check size={10} />
-                                            </IconButton>
-                                            <IconButton
+                                                <Check size={10} style={{ marginRight: 4 }} />
+                                                Apply
+                                            </Button>
+                                            <Button
                                                 size="small"
+                                                variant="outlined"
                                                 onClick={() => onDenyWorkspaceAction?.(wa)}
-                                                sx={{ width: 18, height: 18, borderRadius: '3px', color: 'error.main', '&:hover': { bgcolor: 'rgba(251,113,133,0.15)' } }}
+                                                sx={{
+                                                    minWidth: 0,
+                                                    px: 0.75,
+                                                    py: 0.1,
+                                                    borderRadius: '3px',
+                                                    fontSize: '0.55rem',
+                                                    lineHeight: 1.2,
+                                                    textTransform: 'none',
+                                                    borderColor: 'rgba(251,113,133,0.5)',
+                                                    color: 'error.light',
+                                                    '&:hover': { bgcolor: 'rgba(251,113,133,0.15)', borderColor: 'rgba(251,113,133,0.7)' },
+                                                }}
                                             >
-                                                <X size={10} />
-                                            </IconButton>
+                                                <X size={10} style={{ marginRight: 4 }} />
+                                                Skip
+                                            </Button>
                                         </>
                                     ) : (
                                         <Typography variant="caption" sx={{ fontSize: '0.55rem', color: statusColor, whiteSpace: 'nowrap' }}>
                                             {actionState?.status === 'running' ? 'running...' : statusText}
                                         </Typography>
                                     )}
-                                    {isApplied && wa.type !== 'terminal-command' && wa.type !== 'web-search' && (
+                                    {canPreviewDiff && wa.type !== 'terminal-command' && wa.type !== 'web-search' && (
                                         <Box
                                             component="span"
-                                            onClick={() => toggleDiff(actionKey, wa.path)}
+                                            onClick={() => toggleDiff(actionKey, wa)}
                                             sx={{ fontSize: '0.55rem', color: 'text.disabled', cursor: 'pointer', '&:hover': { color: 'primary.light' }, ml: 0.25 }}
                                         >
                                             <FileDiff size={10} style={{ verticalAlign: 'middle' }} />

@@ -18,9 +18,7 @@ import { createProjectMetadataService } from './runtime/project-metadata-service
 import { createCodeSearchService } from './runtime/code-search-service';
 import { createPatchService } from './runtime/patch-service';
 import { createValidationService } from './runtime/validation-service';
-import { createAiderService } from './runtime/aider-service';
 import { createDatabaseService } from './runtime/database/database-service';
-import { createLlamaService } from './llama-server/llama-service';
 import { createMcpToolsService } from './mcp-tools/mcp-tools-service';
 import * as lmStudioService from './runtime/lm-studio-service';
 import {
@@ -296,14 +294,10 @@ const normalizeDbProfile = (payload = {}) => ({
   const sanitizeAiAssistantSettings = (input = {}) => {
     const roleMappings = input?.roleMappings || {};
     const lmStudio = input?.lmStudio || {};
-    const aider = input?.aider || {};
-    const allowedAgentTypes = ['built-in', 'aider'];
-
-    const rawAgentType = String(input?.agentType || 'built-in').toLowerCase();
+    const orchestrator = input?.orchestrator || {};
 
     return {
       engine: 'lm-studio',
-      agentType: allowedAgentTypes.includes(rawAgentType) ? rawAgentType : 'built-in',
       roleMappings: {
         coding: String(roleMappings.coding || ''),
         vision: String(roleMappings.vision || ''),
@@ -314,10 +308,8 @@ const normalizeDbProfile = (payload = {}) => ({
         port: String(lmStudio.port || '1234').trim() || '1234',
         activeModel: String(lmStudio.activeModel || ''),
       },
-      aider: {
-        autoCommits: Boolean(aider.autoCommits),
-        autoLint: Boolean(aider.autoLint),
-        mapTokens: Math.max(256, Math.min(8192, Number(aider.mapTokens) || 1024)),
+      orchestrator: {
+        maxSteps: Math.max(1, Math.min(24, Number(orchestrator.maxSteps) || 12)),
       },
     };
   };
@@ -336,9 +328,9 @@ const setAiAssistantSettings = (payload = {}) => {
       ...getAiAssistantSettings().lmStudio,
       ...(payload?.lmStudio || {}),
     },
-    aider: {
-      ...getAiAssistantSettings().aider,
-      ...(payload?.aider || {}),
+    orchestrator: {
+      ...getAiAssistantSettings().orchestrator,
+      ...(payload?.orchestrator || {}),
     },
   });
 
@@ -481,10 +473,6 @@ const workspaceIndex = createWorkspaceIndex({
   getWorkspaceRoot: workspaceService.getWorkspaceRoot,
 });
 const databaseService = createDatabaseService();
-const llamaService = createLlamaService({
-  getWorkspaceRoot: workspaceService.getWorkspaceRoot,
-  getRuntimePaths: () => getRuntimePaths(app),
-});
 const projectMetadataService = createProjectMetadataService({
   getWorkspaceRoot: workspaceService.getWorkspaceRoot,
 });
@@ -499,13 +487,10 @@ const validationService = createValidationService({
   getWorkspaceRoot: workspaceService.getWorkspaceRoot,
   getMainWindow: () => mainWindowRef,
 });
-const aiderService = createAiderService({
-  getWorkspaceRoot: workspaceService.getWorkspaceRoot,
-  getMainWindow: () => mainWindowRef,
-});
 const mcpToolsService = createMcpToolsService({
   getWorkspaceRoot: workspaceService.getWorkspaceRoot,
 });
+
 const aiOrchestratorService = createAiOrchestratorService({
   getMainWindow: () => mainWindowRef,
   getWorkspaceRoot: workspaceService.getWorkspaceRoot,
@@ -602,11 +587,23 @@ const sendTerminalOutput = (terminalId, data) => {
   }
 };
 
+const sendTerminalStatus = (terminalId, status, detail = {}) => {
+  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+    mainWindowRef.webContents.send('terminal:status', {
+      terminalId,
+      status: String(status || 'unknown'),
+      ...detail,
+    });
+  }
+};
+
 const killTerminalSession = (terminalId) => {
   const session = terminalSessions.get(terminalId);
   if (!session?.pty) {
     return;
   }
+
+  session.closing = true;
 
   try {
     session.pty.kill();
@@ -615,6 +612,7 @@ const killTerminalSession = (terminalId) => {
   }
 
   terminalSessions.delete(terminalId);
+  sendTerminalStatus(terminalId, 'closed', { reason: 'user-close' });
 };
 
 const resizeTerminalSession = (terminalId, cols = 100, rows = 30) => {
@@ -643,9 +641,23 @@ const resizeTerminalSession = (terminalId, cols = 100, rows = 30) => {
 
 const initializeTerminalShell = (workspaceRoot, options = {}) => {
   const terminalId = String(options.terminalId || buildTerminalId());
-  killTerminalSession(terminalId);
+  const existingSession = terminalSessions.get(terminalId);
+  if (existingSession?.pty) {
+    const resized = resizeTerminalSession(terminalId, options.cols, options.rows);
+    return {
+      ok: true,
+      reused: true,
+      terminalId,
+      cwd: existingSession.cwd,
+      cols: resized?.cols || existingSession.cols,
+      rows: resized?.rows || existingSession.rows,
+    };
+  }
 
-  const cwd = workspaceRoot || workspaceService.getWorkspaceRoot();
+  const preferredCwd = workspaceRoot || workspaceService.getWorkspaceRoot();
+  const cwd = fs.existsSync(preferredCwd) && fs.statSync(preferredCwd).isDirectory()
+    ? preferredCwd
+    : workspaceService.getWorkspaceRoot();
   const cols = Math.max(40, Number(options.cols || 100));
   const rows = Math.max(12, Number(options.rows || 30));
   const shellCommand = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash';
@@ -664,22 +676,36 @@ const initializeTerminalShell = (workspaceRoot, options = {}) => {
     cwd,
     cols,
     rows,
+    createdAt: Date.now(),
+    closing: false,
   });
+
+  sendTerminalStatus(terminalId, 'created', { cwd, cols, rows });
 
   shellProcess.onData((data) => {
     sendTerminalOutput(terminalId, data);
   });
 
   shellProcess.onExit(({ exitCode, signal }) => {
+    const currentSession = terminalSessions.get(terminalId);
+    const wasUserClose = Boolean(currentSession?.closing);
     const shouldEmitExit = Boolean(signal) || (
       Number(exitCode || 0) !== 0 &&
       !(process.platform === 'win32' && Number(exitCode) === WINDOWS_CTRL_C_EXIT_CODE) &&
-      !appIsQuitting
+      !appIsQuitting &&
+      !wasUserClose
     );
 
     if (shouldEmitExit) {
       sendTerminalOutput(terminalId, `\r\n[terminal exited] code=${exitCode} signal=${signal ?? 'none'}\r\n`);
     }
+
+    sendTerminalStatus(terminalId, 'exited', {
+      exitCode: Number(exitCode || 0),
+      signal: signal ?? null,
+      userClosed: wasUserClose,
+    });
+
     if (terminalSessions.get(terminalId)?.pty === shellProcess) {
       terminalSessions.delete(terminalId);
     }
@@ -689,6 +715,8 @@ const initializeTerminalShell = (workspaceRoot, options = {}) => {
     ok: true,
     terminalId,
     cwd,
+    cols,
+    rows,
   };
 };
 
@@ -2288,8 +2316,6 @@ const registerIpcHandlers = () => {
     return result.canceled ? null : result.filePaths[0] || null;
   });
 
-  ipcMain.handle('aider:check', async () => aiderService.checkAvailable());
-
   ipcMain.handle('mcp:terminalExecute', async (_event, payload) =>
     mcpToolsService.executeTerminalTool(payload || {}),
   );
@@ -2298,35 +2324,21 @@ const registerIpcHandlers = () => {
   );
 
   ipcMain.handle('ai:send-prompt', async (_event, payload) => {
-    const settings = payload?.settings || {};
-    if (settings.agentType === 'aider') {
-      return aiderService.sendMessage({
-        traceId: String(payload?.traceId || ''),
-        prompt: String(payload?.prompt || ''),
-        history: Array.isArray(payload?.history) ? payload.history : [],
-        settings,
-        workspaceRoot: String(payload?.workspaceRoot || workspaceService.getWorkspaceRoot()),
-      });
-    }
-    return aiOrchestratorService.sendPrompt({
+    const request = {
       traceId: String(payload?.traceId || ''),
       prompt: String(payload?.prompt || ''),
       history: Array.isArray(payload?.history) ? payload.history : [],
-      settings,
+      settings: { ...(payload?.settings || {}), agentType: 'built-in' },
       workspaceRoot: String(payload?.workspaceRoot || workspaceService.getWorkspaceRoot()),
-    });
+      ideContext: payload?.ideContext || null,
+    };
+
+    return aiOrchestratorService.sendPrompt(request);
   });
-  ipcMain.handle('ai:respond-action', async (_event, payload) =>
-    aiOrchestratorService.respondToAction({
-      traceId: String(payload?.traceId || ''),
-      actionId: String(payload?.actionId || ''),
-      approved: Boolean(payload?.approved),
-    }),
-  );
+  ipcMain.handle('ai:respond-action', async () => {});
   ipcMain.handle('ai:cancel-session', async (_event, payload) => {
     const traceId = String(payload?.traceId || '');
     aiOrchestratorService.cancelSession({ traceId });
-    aiderService.abortSession(traceId);
   });
 
   // ── Layer 1: Project Metadata ──────────────────────────────────────
@@ -2346,6 +2358,9 @@ const registerIpcHandlers = () => {
   // ── Layer 3: Patch Service ─────────────────────────────────────────
   ipcMain.handle('patch:search-replace', async (_event, payload) =>
     patchService.applySearchReplace({ filePath: String(payload?.path || ''), blocks: Array.isArray(payload?.blocks) ? payload.blocks : [] }),
+  );
+  ipcMain.handle('patch:preview-patch', async (_event, payload) =>
+    patchService.previewPatch({ filePath: String(payload?.path || ''), patches: Array.isArray(payload?.patches) ? payload.patches : [] }),
   );
   ipcMain.handle('patch:unified-diff', async (_event, payload) =>
     patchService.applyUnifiedDiff({ filePath: String(payload?.path || ''), diff: String(payload?.diff || '') }),
@@ -2418,6 +2433,9 @@ const registerIpcHandlers = () => {
     terminals: Array.from(terminalSessions.entries()).map(([terminalId, session]) => ({
       terminalId,
       cwd: session.cwd,
+      cols: session.cols,
+      rows: session.rows,
+      createdAt: session.createdAt || 0,
     })),
   }));
 
@@ -2426,13 +2444,13 @@ const registerIpcHandlers = () => {
     const command = String(payload?.command ?? '');
     const session = terminalSessions.get(terminalId);
     if (!session?.pty) {
-      return { ok: false };
+      return { ok: false, error: 'Terminal session is not active.' };
     }
 
     if (command) {
       session.pty.write(command);
     }
-    return { ok: true };
+    return { ok: true, bytes: Buffer.byteLength(command, 'utf8') };
   });
 
   ipcMain.handle('terminal-resize', async (_event, payload) =>
@@ -2576,5 +2594,4 @@ app.on('before-quit', async () => {
     killTerminalSession(terminalId);
   }
   await databaseService.disconnect();
-  await llamaService.shutdown();
 });

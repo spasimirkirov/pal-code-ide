@@ -183,6 +183,11 @@ function FileExplorerPanel({ workspaceRoot, onFileOpen, onPathDeleted }) {
         targetNode: null,
         targetTreeNode: null,
     });
+    const [deleteConfirmState, setDeleteConfirmState] = useState({
+        visible: false,
+        nodeData: null,
+        busy: false,
+    });
     const [selectedTreeNode, setSelectedTreeNode] = useState(null);
     const treeHostRef = useRef(null);
     const contextMenuRef = useRef(null);
@@ -411,9 +416,7 @@ function FileExplorerPanel({ workspaceRoot, onFileOpen, onPathDeleted }) {
             setError('workspaceDeleteFile is unavailable. Restart the app to reload runtime handlers.');
             return;
         }
-
-        const confirmed = window.confirm(`Delete ${nodeData.isDirectory ? 'folder' : 'file'} "${nodeData.name}"?`);
-        if (!confirmed) {
+        if (!nodeData?.path) {
             return;
         }
 
@@ -429,6 +432,35 @@ function FileExplorerPanel({ workspaceRoot, onFileOpen, onPathDeleted }) {
         });
 
         await refreshFileTree();
+    };
+
+    const openDeleteConfirm = (nodeData) => {
+        if (!nodeData || toPortablePath(nodeData.path) === toPortablePath(workspaceRoot)) {
+            return;
+        }
+
+        setContextMenuState((prev) => ({ ...prev, visible: false }));
+        setDeleteConfirmState({ visible: true, nodeData, busy: false });
+    };
+
+    const closeDeleteConfirm = () => {
+        setDeleteConfirmState({ visible: false, nodeData: null, busy: false });
+    };
+
+    const confirmDeletePath = async () => {
+        const nodeData = deleteConfirmState.nodeData;
+        if (!nodeData || deleteConfirmState.busy) {
+            return;
+        }
+
+        setDeleteConfirmState((current) => ({ ...current, busy: true }));
+        try {
+            await deletePath(nodeData);
+            closeDeleteConfirm();
+        } catch (nextError) {
+            setError(nextError?.message || 'Delete failed.');
+            setDeleteConfirmState((current) => ({ ...current, busy: false }));
+        }
     };
 
     const handleContextMenu = (event, nodeData, treeNode) => {
@@ -755,12 +787,52 @@ function FileExplorerPanel({ workspaceRoot, onFileOpen, onPathDeleted }) {
                                 <div className="border-t border-zinc-700/50 my-1" />
                                 <button
                                     className="w-full text-left px-3 py-1.5 hover:bg-zinc-700/50 flex items-center transition-colors text-red-400 hover:text-red-300"
-                                    onClick={() => { void deletePath(menuNodeData); setContextMenuState(prev => ({ ...prev, visible: false })); }}
+                                    onClick={() => { openDeleteConfirm(menuNodeData); }}
                                 >
                                     Delete
                                 </button>
                             </>
                         )}
+                    </div>,
+                    document.body,
+                )
+                : null}
+
+            {deleteConfirmState.visible && typeof document !== 'undefined'
+                ? createPortal(
+                    <div
+                        className="fixed inset-0 z-[2147483646] flex items-center justify-center bg-black/45 backdrop-blur-[1px]"
+                        onMouseDown={(event) => {
+                            if (event.target === event.currentTarget && !deleteConfirmState.busy) {
+                                closeDeleteConfirm();
+                            }
+                        }}
+                    >
+                        <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-[#171a23] p-4 text-zinc-100 shadow-2xl">
+                            <h4 className="text-sm font-semibold text-zinc-100">Confirm Delete</h4>
+                            <p className="mt-2 text-sm text-zinc-300">
+                                Delete {deleteConfirmState.nodeData?.isDirectory ? 'folder' : 'file'} &quot;{deleteConfirmState.nodeData?.name || ''}&quot;?
+                                This action cannot be undone.
+                            </p>
+                            <div className="mt-4 flex justify-end gap-2">
+                                <button
+                                    type="button"
+                                    disabled={deleteConfirmState.busy}
+                                    onClick={closeDeleteConfirm}
+                                    className="rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-60"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={deleteConfirmState.busy}
+                                    onClick={() => { void confirmDeletePath(); }}
+                                    className="rounded-md border border-red-400/50 bg-red-500/15 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/25 disabled:opacity-60"
+                                >
+                                    {deleteConfirmState.busy ? 'Deleting...' : 'Delete'}
+                                </button>
+                            </div>
+                        </div>
                     </div>,
                     document.body,
                 )

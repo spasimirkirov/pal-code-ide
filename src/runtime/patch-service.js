@@ -152,6 +152,53 @@ export const createPatchService = ({ getWorkspaceRoot }) => {
         return { ok: false, path: absPath, error: 'Some search blocks failed to match.', results };
     };
 
+    const previewPatch = ({ filePath: targetPath, patches }) => {
+        const root = getWorkspaceRoot();
+        const absPath = normalizeInsideRoot(root, path.resolve(root, targetPath));
+        if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
+            return { ok: false, error: `File not found: ${targetPath}` };
+        }
+
+        const original = fs.readFileSync(absPath, 'utf-8');
+        let content = original;
+        const sourcePatches = Array.isArray(patches) ? patches : [];
+        const results = [];
+
+        for (const patch of sourcePatches) {
+            const search = String(patch?.search ?? patch?.find ?? '');
+            const replace = String(patch?.replace ?? '');
+
+            if (!search) {
+                results.push({ ok: false, error: 'Patch block is missing search/find text.' });
+                continue;
+            }
+
+            const next = applyBlock(content, { search, replace });
+            if (next === null) {
+                results.push({
+                    ok: false,
+                    error: 'Search block not found in file. The exact text to replace must match what is in the file.',
+                    search: search.slice(0, 200),
+                });
+                continue;
+            }
+
+            content = next;
+            results.push({ ok: true });
+        }
+
+        const diff = diffLib.createTwoFilesPatch(targetPath, targetPath, original, content, '', '');
+        const allMatched = results.length > 0 && results.every((r) => r.ok);
+
+        return {
+            ok: allMatched,
+            path: targetPath,
+            diff,
+            hasChanges: original !== content,
+            results,
+        };
+    };
+
     // ── Unified Diff Application ──────────────────────────────────────
 
     const applyUnifiedDiff = ({ filePath: targetPath, diff }) => {
@@ -225,6 +272,7 @@ export const createPatchService = ({ getWorkspaceRoot }) => {
         parseSearchReplaceBlocks,
         parseXmlBlocks,
         applySearchReplace,
+        previewPatch,
         applyUnifiedDiff,
         createUnifiedDiff,
         rollback,
